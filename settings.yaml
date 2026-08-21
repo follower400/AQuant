@@ -1,0 +1,115 @@
+# ============================================================================
+# 均衡混合灵活配置策略 —— 参数总表 (PRD v2.0)
+# 本文件为全项目唯一参数来源，策略代码严禁硬编码任何阈值。
+# 所有比例字段使用小数表示（如 0.03 表示 3%）。
+# 文件由 config.py 在启动时加载并校验，任何非法值将导致程序拒绝启动。
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. 宏观市场景气度判定 (Market Regime)
+# ---------------------------------------------------------------------------
+market_regime:
+  ma_period: 60                # 沪深300 景气判定 MA 周期（日）
+  macd_fast: 12                # MACD 快线周期（EMA12）
+  macd_slow: 26                # MACD 慢线周期（EMA26）
+  macd_signal: 9               # MACD 信号线周期（DEA9）
+  rsi_period: 14               # RSI 计算周期（日）
+  rsi_bull_threshold: 50       # 景气上行：RSI > 50
+  rsi_bear_low: 30             # 低落横盘：30 < RSI
+  rsi_bear_high: 50            # 低落横盘：RSI < 50
+  volume_ma_period: 5          # 量能确认基准：5 日均量（日）
+  volume_ratio: 1.0            # 景气上行量能确认：当日成交量 >= 5日均量 * 1.0
+  force_reduce_loss_days: 5    # 强制减仓：沪深300 连续收阴天数
+  force_reduce_loss_drop: 0.03 # 强制减仓：期间累计跌幅 >= 3%
+
+# ---------------------------------------------------------------------------
+# 2. 科技股短线策略 (Tech Stocks)
+# ---------------------------------------------------------------------------
+tech:
+  price_min: 1.0               # 选股价格下限（元）
+  price_max: 20.0              # 选股价格上限（元）
+  industries:                  # 行业白名单
+    - 电子
+    - 计算机
+    - 通信
+    - 电力设备
+    - 传媒
+  drawdown_window: 60          # 超跌回撤观察窗口（日）
+  max_drawdown_required: 0.30  # 近60日最大回撤 >= 30%
+  rebound_from_low_max: 0.15   # 当前距低点反弹 <= 15%
+  ma_trend_periods: [5, 10, 20]   # 趋势确认：收 > MA20 且 MA5 > MA10 > MA20
+  limit_up_months: 3           # 股性验证：近3个月至少1次涨停
+  volatility_min: 0.20         # 股性验证：年化波动率下界 20%
+  volatility_max: 0.60         # 股性验证：年化波动率上界 60%
+  rsi_min: 30                  # 估值区间：RSI >= 30
+  rsi_max: 55                  # 估值区间：RSI <= 55
+  pe_percentile_years: 5       # PE 分位回看年限
+  pe_percentile_max: 0.50      # PE 近5年分位 <= 50%
+
+  # ---- 分批建仓（三次合计必须为 100%）----
+  position_1st: 0.30           # 首次建仓比例 30%
+  position_2nd: 0.30           # 第二次加仓比例 30%
+  position_3rd: 0.40           # 第三次加仓比例 40%
+  first_volume_ratio: 1.2      # 首次建仓量能：成交量 >= 5日均量 * 1.2
+  pause_add_drop: 0.05         # 首笔建仓后下跌 >= 5% 暂停加仓
+  accelerate_add_rise: 0.08    # 首笔建仓后上涨 >= 8% 加速执行
+
+  # ---- 卖出规则 ----
+  limit_up_main: 0.095         # 涨停阈值（主板 9.5%）
+  limit_up_chinext: 0.195      # 涨停阈值（创业板/科创板 19.5%）
+  limit_up_consecutive: 2      # 连续2个涨停板后，第3日处理
+  limit_up_sell_ratio: 0.50    # 第3日开盘卖出 50%
+  limit_up_trail_ma: 5         # 剩余仓位跌破 MA5 清仓
+  time_stop_days: 20           # 持仓满20个交易日强制平仓
+  t_sell_rise: 0.05            # 做T：涨幅 >= 5%
+  t_sell_rsi: 70               # 做T：分时 RSI >= 70
+  t_sell_ratio_min: 0.20       # 做T：卖出下限 20%
+  t_sell_ratio_max: 0.30       # 做T：卖出上限 30%
+  t_buy_below_ma: 0.02         # 做T：回调至分时均线下方 2% 回补
+  stop_loss: 0.08              # 硬性止损：亏损达 8% 强制止损
+
+# ---------------------------------------------------------------------------
+# 3. 金融股与 ETF 长线底仓策略 (Value & ETF)
+# ---------------------------------------------------------------------------
+value:
+  pb_percentile_years: 5       # PB 分位回看年限
+  pb_percentile_max: 0.30      # 金融股 PB 近5年分位 <= 30%
+  dividend_yield_min: 0.03     # 股息率 >= 3%
+  roe_min_percentile: 0.40     # ROE >= 行业 40 分位
+  debt_ratio_max_percentile: 0.60  # 资产负债率 <= 行业 60 分位
+  etf_list:                    # ETF 标的池
+    - 创业板ETF
+    - 科创50ETF
+  init_pb_percentile: 0.20     # 初始建仓：PB 分位 <= 20%
+  init_pe_percentile: 0.30     # 初始建仓：PE 分位 <= 30%
+  init_position_ratio: 0.60    # 初始建仓比例 60%
+  trend_ma_periods: [120, 250] # 趋势加仓：触及 MA120 或 MA250
+  panic_drop_1d: 0.03          # 恐慌加仓：沪深300 单日跌超 3%
+  panic_drop_days: 3           # 恐慌加仓：连续 3 日下跌
+  panic_add_ratio: 0.10        # 恐慌额外加仓 10%
+  take_profit_percentile: 0.70 # 止盈：PB/PE 分位 >= 70% 分批止盈
+  take_profit_ratio: 0.50      # 止盈：每次卖出 50%
+
+# ---------------------------------------------------------------------------
+# 4. 全局硬性风控 (Global Risk Control)
+# ---------------------------------------------------------------------------
+risk:
+  half_position_loss_days: 5   # 科技股减半：沪深300 连续5日下跌
+  forbid_open_rise: 0.03       # 禁止开仓：单日涨超 3%
+  forbid_open_rsi: 70          # 禁止开仓：RSI >= 70
+  clear_tech_ma: 120           # 科技股清仓：沪深300 跌破 MA120
+  position_single_stock_max: 0.15   # 仓位上限：科技股单票 <= 15% 总资产
+  position_tech_total_max: 0.60     # 仓位上限：科技板块合计 <= 60% 总资产
+  position_value_total_max: 0.40    # 仓位上限：金融+ETF 底仓合计 <= 40%
+  annual_return_target: 0.12   # 组合目标：年化 ROI >= 12%
+  volatility_target: 0.18      # 组合目标：波动率 <= 18%
+  max_drawdown_limit: 0.25     # 组合目标：最大回撤 < 25%（回测验收线）
+
+# ---------------------------------------------------------------------------
+# 5. 运营与调度 (Operation)
+# ---------------------------------------------------------------------------
+operation:
+  schedule_times: ["09:40", "14:40"]  # 每日定时运行时刻（对应 Ubuntu Crontab）
+  rebalance_monthly: true       # 月末组合再平衡开关
+  data_retry_times: 3           # AKShare 数据源失败重试次数
+  cache_expire_days: 5          # SQLite 缓存过期天数（超过则静默退出）
