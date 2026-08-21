@@ -18,6 +18,7 @@ from src.indicators import (
     macd,
     max_drawdown,
     rsi,
+    valuation_percentile,
 )
 
 
@@ -251,3 +252,172 @@ class TestAddAllIndicators:
         """非 DataFrame 输入必须抛 TypeError"""
         with pytest.raises(TypeError):
             add_all_indicators([1, 2, 3])
+
+
+# ---------------------------------------------------------------------------
+# P2 新增：估值历史分位 valuation_percentile
+# ---------------------------------------------------------------------------
+def make_val_df(pairs):
+    """构造估值 DataFrame：pairs 为 (日期, pe值) 列表，值 None 表示缺失"""
+    return pd.DataFrame({
+        "trade_date": [d for d, _ in pairs],
+        "pe": [Decimal(str(v)) if v is not None else None for _, v in pairs],
+    })
+
+
+class TestValuationPercentile:
+    def test_basic_percentile(self):
+        """[10,20,30,40,25] 当前 25：此前样本中低于 25 的有 2 个 -> 2/4 = 0.5"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 30),
+            ("2025-01-04", 40), ("2025-01-05", 25),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal("0.5")
+
+    def test_min_value_is_zero(self):
+        """当前为窗口最低值 -> 分位 0"""
+        df = make_val_df([
+            ("2025-01-01", 50), ("2025-01-02", 40), ("2025-01-03", 30),
+            ("2025-01-04", 20), ("2025-01-05", 10),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal(0)
+
+    def test_max_value_is_one(self):
+        """当前为窗口最高值 -> 分位 1（全部历史样本低于当前）"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 30),
+            ("2025-01-04", 40), ("2025-01-05", 50),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal(1)
+
+    def test_tie_not_counted_as_below(self):
+        """等值样本不计入「低于」：当前 20，此前 [10,20,20,20] -> 1/4 = 0.25"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 20),
+            ("2025-01-04", 20), ("2025-01-05", 20),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal("0.25")
+
+    def test_negative_samples_excluded(self):
+        """负 PE 样本剔除：当前 15，正样本 [10,20,30] 中低于的 [10] -> 1/3"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", -5), ("2025-01-03", 20),
+            ("2025-01-04", 30), ("2025-01-05", 15),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal(1) / Decimal(3)
+
+    def test_current_negative_none(self):
+        """当日 PE 为负（亏损）时分位为 None"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", -5),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] is None
+
+    def test_current_missing_none(self):
+        """当日 PE 缺失时分位为 None"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", None),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] is None
+
+    def test_window_filter_by_years(self):
+        """years=1 只统计近 1 年：窗口 [2024-08-01, 2025-08-01) 内仅 [10, 20] -> 0.5"""
+        df = make_val_df([
+            ("2024-01-01", 100), ("2024-06-01", 100),  # 超出窗口，应被过滤
+            ("2025-06-01", 10), ("2025-07-01", 20),
+            ("2025-08-01", 15),
+        ])
+        valuation_percentile(df, column="pe", years=1)
+        assert df["pe_percentile_1y"].iloc[-1] == Decimal("0.5")
+
+    def test_insufficient_samples_none(self):
+        """窗口内有效样本不足 min_samples（默认 2）时分位为 None"""
+        df = make_val_df([
+            ("2024-01-01", 100),   # 超出 1 年窗口
+            ("2025-06-01", 10),    # 窗口内唯一样本
+            ("2025-08-01", 15),
+        ])
+        valuation_percentile(df, column="pe", years=1)
+        assert df["pe_percentile_1y"].iloc[-1] is None
+
+    def test_leading_row_none(self):
+        """首行无此前样本，分位为 None"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 30),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[0] is None
+        assert df["pe_percentile_5y"].iloc[-1] is not None
+
+    def test_decimal_exact_fraction(self):
+        """结果必须为 Decimal 精确分数（2/7 不得有浮点误差）"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 30),
+            ("2025-01-04", 40), ("2025-01-05", 50), ("2025-01-06", 60),
+            ("2025-01-07", 70), ("2025-01-08", 25),
+        ])
+        valuation_percentile(df, column="pe", years=5)
+        value = df["pe_percentile_5y"].iloc[-1]
+        assert value == Decimal(2) / Decimal(7)
+        assert isinstance(value, Decimal)
+
+    def test_default_years_from_settings_pe(self):
+        """column='pe' 不传 years 时应读 tech.pe_percentile_years（=5）"""
+        df = make_val_df([
+            ("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 15),
+        ])
+        valuation_percentile(df, column="pe")
+        assert "pe_percentile_5y" in df.columns
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal("0.5")
+
+    def test_default_years_from_settings_pb(self):
+        """column='pb' 不传 years 时应读 value.pb_percentile_years（=5）"""
+        df = pd.DataFrame({
+            "trade_date": ["2025-01-01", "2025-01-02", "2025-01-03"],
+            "pb": [Decimal("1.0"), Decimal("2.0"), Decimal("1.5")],
+        })
+        valuation_percentile(df, column="pb")
+        assert "pb_percentile_5y" in df.columns
+        assert df["pb_percentile_5y"].iloc[-1] == Decimal("0.5")
+
+    def test_unknown_column_requires_years(self):
+        """非 pe/pb 列且未显式传 years 时应抛 ValueError"""
+        df = pd.DataFrame({
+            "trade_date": ["2025-01-01", "2025-01-02"],
+            "ps": [Decimal("1"), Decimal("2")],
+        })
+        with pytest.raises(ValueError):
+            valuation_percentile(df, column="ps")
+
+    def test_validation(self):
+        """非法输入必须抛错：非 DataFrame / 缺列 / 年限非法"""
+        df = make_val_df([("2025-01-01", 10), ("2025-01-02", 20)])
+        with pytest.raises(TypeError):
+            valuation_percentile([1, 2])
+        with pytest.raises(ValueError):
+            valuation_percentile(df, column="pe", years=0)
+        with pytest.raises(ValueError):
+            valuation_percentile(pd.DataFrame({"pe": [1, 2]}), column="pe", years=3)
+
+    def test_date_object_input(self):
+        """trade_date 传 date 对象也能正确处理"""
+        from datetime import date as date_cls
+        df = pd.DataFrame({
+            "trade_date": [date_cls(2025, 1, 1), date_cls(2025, 1, 2), date_cls(2025, 1, 3)],
+            "pe": [Decimal("10"), Decimal("20"), Decimal("15")],
+        })
+        valuation_percentile(df, column="pe", years=5)
+        assert df["pe_percentile_5y"].iloc[-1] == Decimal("0.5")
+
+    def test_output_in_same_dataframe(self):
+        """输出应包含在输入 DataFrame 中（同一对象，不复制）"""
+        df = make_val_df([("2025-01-01", 10), ("2025-01-02", 20), ("2025-01-03", 15)])
+        result = valuation_percentile(df, column="pe", years=5)
+        assert result is df

@@ -1,5 +1,5 @@
 """
-indicators.py —— Layer 2 因子计算层：纯数学计算（MA / MACD / RSI / 年化波动率 / 最大回撤）
+indicators.py —— Layer 2 因子计算层：纯数学计算（MA / MACD / RSI / 年化波动率 / 最大回撤 / 估值历史分位）
 
 设计约束（遵循 .coderule 与 PROJECT_PLAN.md Layer 2 规划）：
 - 输入必须是 DataFrame，输出以新增列的形式包含在输入 DataFrame 中（不复制）；
@@ -9,16 +9,19 @@ indicators.py —— Layer 2 因子计算层：纯数学计算（MA / MACD / RSI
 - 周期参数可显式传入，缺省时自动从 settings.yaml 对应配置读取。
 
 用法示例：
-    from data_layer import get_kline
-    from indicators import add_all_indicators, rsi, ma
+    from data_layer import get_kline, get_valuation_history
+    from indicators import add_all_indicators, rsi, ma, valuation_percentile
     df = get_kline("sh000300", is_index=True)
     df = add_all_indicators(df)     # 一次性追加 ma5/ma10/.../macd_*/rsi14/volatility/max_drawdown
     df = rsi(df, period=14)         # 或单独计算某个因子
+    val = get_valuation_history("000001")          # 估值历史（trade_date/pe/pb）
+    val = valuation_percentile(val, column="pe")   # PE 近 5 年分位（窗口默认读配置）
 """
 
 from __future__ import annotations
 
 import sys
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
@@ -47,6 +50,23 @@ def _ensure_decimal(series: pd.Series) -> List[Decimal]:
             out.append(v)
         elif v is None or pd.isna(v):
             raise ValueError("价格列存在缺失值，因子计算前请先清洗数据")
+        else:
+            out.append(Decimal(str(v)))
+    return out
+
+
+def _ensure_decimal_optional(series: pd.Series) -> List[Optional[Decimal]]:
+    """将估值列转为 Decimal 列表（允许缺失值 -> None；非法值抛错）
+
+    P2 新增：估值序列（PE/PB）某日可能缺某个指标，缺失保留为 None，
+    由调用方（如估值分位）自行决定剔除或跳过。
+    """
+    out: List[Optional[Decimal]] = []
+    for v in series:
+        if isinstance(v, Decimal):
+            out.append(v)
+        elif v is None or pd.isna(v):
+            out.append(None)
         else:
             out.append(Decimal(str(v)))
     return out
@@ -270,6 +290,104 @@ def max_drawdown(df: pd.DataFrame, window: Optional[int] = None,
         trough = min(chunk[peak_index:])  # 峰值之后的最低点
         out[i] = (peak - trough) / peak
     df["max_drawdown"] = out
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 估值历史分位（P2 新增）
+# ---------------------------------------------------------------------------
+# 分位窗口内最少有效样本数：不足时历史分布无统计意义，返回 None
+_MIN_PERCENTILE_SAMPLES = 2
+
+
+def _sub_years(d: date, years: int) -> date:
+    """日期减 N 年；2 月 29 日等边界回退到当月 28 日，避免 replace 抛错"""
+    try:
+        return d.replace(year=d.year - years)
+    except ValueError:
+        return d.replace(year=d.year - years, day=28)
+
+
+def _to_date(d) -> date:
+    """各种日期表示（str / date / datetime / Timestamp）统一转为 datetime.date"""
+    if isinstance(d, datetime):  # 含 pd.Timestamp（datetime 子类）
+        return d.date()
+    if isinstance(d, date):
+        return d
+    return datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
+
+
+def valuation_percentile(df: pd.DataFrame, column: str = "pe",
+                         years: Optional[int] = None,
+                         min_samples: int = _MIN_PERCENTILE_SAMPLES) -> pd.DataFrame:
+    """估值历史百分位，输出列 {column}_percentile_{years}y（0~1 小数，越低越便宜）
+
+    定义：对每一行（当日估值），统计此前近 years 年内「低于当日估值」的
+    正样本占比：
+        percentile = count(v < current, v > 0) / count(v > 0)
+    0 = 窗口内历史最低，1 = 窗口内历史最高（严格小于口径）。
+
+    处理约定：
+      - 仅正样本参与统计：负 PE（亏损）/负 PB（资不抵债）无估值意义一律剔除，
+        防止亏损股因负 PE 被误判为「低估」；当日估值为 None 或 <= 0 时分位为 None；
+      - 仅统计当日之前的样本（避免未来函数），窗口内有效样本不足
+        min_samples 时分位为 None；
+      - 输入必须按 trade_date 升序（数据层 get_valuation_history 已保证）。
+
+    性能说明：O(n²) 纯 Python 循环，近 5 年日频约 1200 行时秒级完成，
+    与 P1 max_drawdown 同策略（精度优先，千行级数据量可接受）。
+
+    :param column: 估值列名（'pe' / 'pb'），同时决定缺省回看年限：
+                   pe -> settings.tech.pe_percentile_years
+                   pb -> settings.value.pb_percentile_years
+    :param years: 回看年限（如 3 / 5），缺省按 column 从配置读取
+    :param min_samples: 窗口内最少有效样本数（低于则返回 None）
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"输入必须是 pandas DataFrame，实际为 {type(df).__name__}")
+    for need in (column, "trade_date"):
+        if need not in df.columns:
+            raise ValueError(f"DataFrame 缺少必需列: {need}")
+    if years is None:
+        settings = config.get_settings()
+        if column == "pe":
+            years = settings.tech.pe_percentile_years
+        elif column == "pb":
+            years = settings.value.pb_percentile_years
+        else:
+            raise ValueError(
+                f"无法从配置推断回看年限，请显式传入 years 参数（column={column}）")
+    if years < 1:
+        raise ValueError(f"回看年限必须为正整数，实际为 {years}")
+    if min_samples < 1:
+        raise ValueError(f"最少有效样本数必须为正整数，实际为 {min_samples}")
+
+    values = _ensure_decimal_optional(df[column])
+    dates = [_to_date(d) for d in df["trade_date"]]
+
+    n = len(df)
+    out: List[Optional[Decimal]] = [None] * n
+    for i in range(n):
+        current = values[i]
+        if current is None or current <= 0:
+            out[i] = None  # 当日估值缺失或为负，分位无意义
+            continue
+        cutoff = _sub_years(dates[i], years)
+        cnt = 0
+        total = 0
+        for j in range(i):  # 仅统计当日之前的样本，避免未来函数
+            if dates[j] < cutoff:
+                continue  # 超出回看窗口
+            v = values[j]
+            if v is None or v <= 0:
+                continue  # 剔除负值与缺失样本
+            total += 1
+            if v < current:
+                cnt += 1
+        if total < min_samples:
+            continue  # 窗口内有效样本不足，分位无统计意义
+        out[i] = Decimal(cnt) / Decimal(total)
+    df[f"{column}_percentile_{years}y"] = out
     return df
 
 
