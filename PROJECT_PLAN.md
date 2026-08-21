@@ -2,7 +2,7 @@
 
 ## 0. 当前进度（每完成一个 Phase 更新一次）
 
-> 最近更新：2026-08-21（完成 Phase 0 配置系统，进入 Phase 1）
+> 最近更新：2026-08-21（完成 Phase 1 数据基建与因子库，进入 Phase 2）
 
 | 阶段 | 任务 | 状态 |
 | :--- | :--- | :--- |
@@ -12,11 +12,11 @@
 | 前置 | 文档配套：requirements.txt / .gitignore 完善 | ✅ 已完成 |
 | Phase 0 | `config/settings.yaml` 参数总表（PRD 全部阈值提取） | ✅ 已完成 |
 | Phase 0 | `config.py` 加载与校验逻辑（类型/范围/交叉校验） | ✅ 已完成 |
-| Phase 0 | SQLite 本地缓存模块（AKShare 降级读取） | ⏳ 未开始 |
-| Phase 1 | 数据层 `data_fetcher.py`（AKShare 封装，沪深300/ETF/估值分位） | ⏳ 未开始（下一步） |
-| Phase 1 | 因子库 `indicators.py`（MA/MACD/RSI/回撤/年化波动率/分位） | ⏳ 未开始 |
-| Phase 1 | Pytest 单元测试（`ma_cross_detection` / `max_drawdown`） | ⏳ 未开始 |
-| Phase 2 | 策略信号逻辑（market_regime / stock_screener / position_sizing） | ⏳ 未开始 |
+| Phase 0 | SQLite 本地缓存模块（AKShare 降级读取） | ✅ 已完成 |
+| Phase 1 | 数据层 `src/data_layer.py`（AKShare 封装 + SQLite 缓存，沪深300/个股） | ✅ 已完成 |
+| Phase 1 | 因子库 `src/indicators.py`（MA/MACD/RSI/年化波动率/回撤，Decimal 精度） | ✅ 已完成 |
+| Phase 1 | Pytest 单元测试（tests/，41 个用例全部通过，含真实数据链路验证） | ✅ 已完成 |
+| Phase 2 | 策略信号逻辑（market_regime / stock_screener / position_sizing） | ⏳ 未开始（下一步） |
 | Phase 3 | AI 提示词工程与 JSON Schema 校验 | ⏳ 未开始 |
 | Phase 4 | 端到端联调（Ubuntu Crontab + 微信推送） | ⏳ 未开始 |
 | Phase 5 | 本地回测闭环（vectorbt 调参验证） | ⏳ 未开始 |

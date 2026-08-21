@@ -34,9 +34,12 @@ ENV_FILE = PROJECT_ROOT / ".env"
 
 # ---------------------------------------------------------------------------
 # 环境变量登记表：逻辑名 -> 候选环境变量名（按优先级依次回退）
+# 注意：dashscope_base_url 为百炼 API 端点地址（如 /compatible-mode/v1），
+#       与 API Key 独立配置，两者缺一不可用于 AI 层调用。
 # ---------------------------------------------------------------------------
 ENV_REGISTRY: Dict[str, Tuple[str, ...]] = {
     "dashscope_api_key": ("DASHSCOPE_API_KEY", "API_KEY_aliyun"),
+    "dashscope_base_url": ("DASHSCOPE_BASE_URL", "OPENAI_BASE_URL"),
     "deepseek_api_key": ("API_KEY_Deepseek",),
     "pushplus_token": ("PUSHPLUS_TOKEN",),
 }
@@ -44,6 +47,9 @@ ENV_REGISTRY: Dict[str, Tuple[str, ...]] = {
 # 模拟总资产的环境变量名与默认值（单位：元）
 CAPITAL_ENV_KEY = "SIMULATED_TOTAL_CAPITAL"
 DEFAULT_CAPITAL = "1000000"
+
+# .env 文件候选编码（Windows 中文环境编辑器可能以 GBK 保存，需自动适配）
+_ENV_ENCODINGS = ("utf-8", "gbk")
 
 # ---------------------------------------------------------------------------
 # settings.yaml 字段校验类型约定：
@@ -265,20 +271,34 @@ def _cross_validate(section: str, data: Dict[str, Any]) -> List[str]:
 # 环境变量读取（.env 文件 + 进程环境变量）
 # ---------------------------------------------------------------------------
 def _parse_env_file(path: Path) -> Dict[str, str]:
-    """解析 .env 文件（KEY=VALUE、# 注释、忽略空行），返回键值字典"""
+    """解析 .env 文件（KEY=VALUE、# 注释、忽略空行），返回键值字典
+
+    编码兼容：优先按 UTF-8 解码，失败回退 GBK，再失败以替换符兜底，
+    保证 Windows 下以任意编码保存的 .env 都不会导致解析崩溃。
+    """
     result: Dict[str, str] = {}
     if not path.exists():
         return result
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key:
-                result[key] = value
+    raw_bytes = path.read_bytes()
+    text = ""
+    for enc in _ENV_ENCODINGS:
+        try:
+            text = raw_bytes.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        # 兜底：逐字节替换非法序列，保证不抛异常（注释乱码不影响键值解析）
+        text = raw_bytes.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            result[key] = value
     return result
 
 
@@ -330,6 +350,11 @@ class Settings:
     def dashscope_api_key(self) -> Optional[str]:
         """阿里云百炼 API Key（AI 解读层），未配置时为 None"""
         return self.env["dashscope_api_key"]
+
+    @property
+    def dashscope_base_url(self) -> Optional[str]:
+        """阿里云百炼 API 端点地址（与 Key 独立配置），未配置时为 None"""
+        return self.env["dashscope_base_url"]
 
     @property
     def deepseek_api_key(self) -> Optional[str]:
@@ -402,7 +427,8 @@ def _self_check() -> None:
           f"科技板块 {s.risk.position_tech_total_max}, 底仓 {s.risk.position_value_total_max}")
     print(f"[OK] 调度时刻: {s.operation.schedule_times} | 月末再平衡: {s.operation.rebalance_monthly}")
     print(f"[OK] 模拟总资产: {s.simulated_capital} 元")
-    print(f"[OK] 阿里云百炼 Key: {'已配置' if s.dashscope_api_key else '未配置'}")
+    print(f"[OK] 阿里云百炼 Key: {'已配置' if s.dashscope_api_key else '未配置'} | "
+          f"Base URL: {'已配置' if s.dashscope_base_url else '未配置'}")
     print(f"[OK] PushPlus Token: {'已配置' if s.pushplus_token else '未配置'}")
 
 
