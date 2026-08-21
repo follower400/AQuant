@@ -113,3 +113,4 @@ operation:
   rebalance_monthly: true       # 月末组合再平衡开关
   data_retry_times: 3           # AKShare 数据源失败重试次数
   cache_expire_days: 5          # SQLite 缓存过期天数（超过则静默退出）
+  valuation_history_period: 近五年  # 个股估值历史拉取窗口（百度股市通 period 枚举：近一年/近三年/近五年/近十年/全部，P2 估值分位计算依赖近3年/近5年窗口）

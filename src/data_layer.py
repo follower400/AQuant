@@ -15,16 +15,22 @@ data_layer.py —— Layer 1 数据层：AKShare 行情获取 + SQLite 本地缓
        open/high/low/close  TEXT  价格（Decimal 字符串）
        volume      REAL  成交量（股）
        amount      TEXT  成交额（元，Decimal 字符串，可为 NULL）
-  2. cache_meta —— 缓存元信息表
-       code        TEXT  证券代码（主键）
-       data_type   TEXT  数据类型（当前固定 'kline'）
+  2. valuation  —— 个股估值历史表，(code, trade_date) 联合主键（P2 新增）
+       code        TEXT  证券代码（如 000001）
+       trade_date  TEXT  日期（YYYY-MM-DD，自然日序列）
+       pe          TEXT  市盈率(TTM)，Decimal 字符串（亏损为负，缺失为 NULL）
+       pb          TEXT  市净率，Decimal 字符串（可为负，缺失为 NULL）
+  3. cache_meta —— 缓存元信息表，(code, data_type) 联合主键（P2 由 code 单主键迁移）
+       code        TEXT  证券代码
+       data_type   TEXT  数据类型（'kline' / 'valuation'）
        updated_at  TEXT  最近刷新时间（ISO8601，用于过期判断）
 
 用法示例：
-    from data_layer import get_kline
+    from data_layer import get_kline, get_valuation_history
     df = get_kline("sh000300", is_index=True)      # 沪深300 日线（优先缓存）
     df = get_kline("000001", refresh=True)         # 强制刷新个股日线
     df = get_kline("sh000300", start_date="2026-01-01", end_date="2026-08-21")
+    val = get_valuation_history("000001")          # 个股 PE(TTM)/PB 历史（优先缓存）
 """
 
 from __future__ import annotations
@@ -61,7 +67,19 @@ class DataFetchError(RuntimeError):
 # ---------------------------------------------------------------------------
 DB_PATH: Path = config.PROJECT_ROOT / "data" / "market_cache.db"
 
-# 建表语句：K 线主表 + 缓存元信息表 + 索引
+# 建表语句：K 线主表 + 估值历史表 + 缓存元信息表 + 索引
+# 修正记录（P2）：cache_meta 主键由 code 单主键调整为 (code, data_type) 复合主键，
+# 以区分 kline 与 valuation 两类缓存的新鲜度；P1 旧库由 _migrate_cache_meta 无损迁移，
+# 影响面：仅 data_layer 内部缓存新鲜度判断与元信息写入。
+_CACHE_META_TABLE_SQL: str = """
+    CREATE TABLE IF NOT EXISTS cache_meta (
+        code       TEXT NOT NULL,
+        data_type  TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (code, data_type)
+    )
+    """
+
 _SCHEMA_SQL: Tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS kline (
@@ -78,12 +96,16 @@ _SCHEMA_SQL: Tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_kline_code_date ON kline (code, trade_date)",
     """
-    CREATE TABLE IF NOT EXISTS cache_meta (
-        code       TEXT PRIMARY KEY,
-        data_type  TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS valuation (
+        code       TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        pe         TEXT,
+        pb         TEXT,
+        PRIMARY KEY (code, trade_date)
     )
     """,
+    "CREATE INDEX IF NOT EXISTS idx_valuation_code_date ON valuation (code, trade_date)",
+    _CACHE_META_TABLE_SQL,
 )
 
 # AKShare 不同接口的列名 -> 内部标准列名 映射表
@@ -100,6 +122,15 @@ _COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
 # 价格类列（必须为 Decimal 字符串）
 _PRICE_COLUMNS: Tuple[str, ...] = ("open", "high", "low", "close", "amount")
 
+# 估值类列（必须为 Decimal 字符串；负值合法，缺失为 NULL）
+_VALUATION_COLUMNS: Tuple[str, ...] = ("pe", "pb")
+
+# 百度股市通估值指标名 -> 内部字段名（PE 采用 TTM 口径，与 PRD 分位计算约定一致）
+_VALUATION_INDICATORS: Dict[str, str] = {
+    "pe": "市盈率(TTM)",
+    "pb": "市净率",
+}
+
 
 # ---------------------------------------------------------------------------
 # SQLite 连接管理
@@ -108,7 +139,7 @@ _conn: Optional[sqlite3.Connection] = None
 
 
 def _get_connection() -> sqlite3.Connection:
-    """获取全局 SQLite 连接（首次调用时建目录、建表）"""
+    """获取全局 SQLite 连接（首次调用时建目录、建表、执行旧库迁移）"""
     global _conn
     if _conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +148,29 @@ def _get_connection() -> sqlite3.Connection:
         for sql in _SCHEMA_SQL:
             _conn.execute(sql)
         _conn.commit()
+        _migrate_cache_meta(_conn)  # P2 新增：兼容 P1 旧库的 cache_meta 结构
     return _conn
+
+
+def _migrate_cache_meta(conn: sqlite3.Connection) -> None:
+    """迁移 cache_meta 旧结构（code 单主键）到复合主键 (code, data_type)
+
+    修正记录（P2）：P1 版本的 cache_meta 主键只有 code，无法区分 kline 与
+    valuation 两类缓存；迁移步骤为 旧表改名 -> 建新表 -> 旧数据以
+    data_type='kline' 迁入 -> 删除旧表，全程单事务保证原子性。
+    影响面：仅 data_layer 内部的缓存新鲜度判断与元信息写入。
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='cache_meta'").fetchone()
+    if row is None or "PRIMARY KEY (code, data_type)" in (row["sql"] or ""):
+        return  # 无表或已是新结构，无需迁移
+    with conn:
+        conn.execute("ALTER TABLE cache_meta RENAME TO cache_meta_old")
+        conn.execute(_CACHE_META_TABLE_SQL)
+        conn.execute(
+            "INSERT INTO cache_meta (code, data_type, updated_at) "
+            "SELECT code, 'kline', updated_at FROM cache_meta_old")
+        conn.execute("DROP TABLE cache_meta_old")
 
 
 def close() -> None:
@@ -211,9 +264,15 @@ def _fetch_with_retry(fetch_fn, retry_times: int) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # SQLite 缓存读写
 # ---------------------------------------------------------------------------
-def _is_cache_fresh(conn: sqlite3.Connection, code: str, expire_days: int) -> bool:
-    """缓存是否新鲜：cache_meta.updated_at 距今未超过 expire_days 天"""
-    row = conn.execute("SELECT updated_at FROM cache_meta WHERE code = ?", (code,)).fetchone()
+def _is_cache_fresh(conn: sqlite3.Connection, code: str, expire_days: int,
+                    data_type: str = "kline") -> bool:
+    """缓存是否新鲜：cache_meta.updated_at 距今未超过 expire_days 天
+
+    :param data_type: 数据类型（'kline' / 'valuation'），P2 起 K 线与估值缓存独立判新鲜
+    """
+    row = conn.execute(
+        "SELECT updated_at FROM cache_meta WHERE code = ? AND data_type = ?",
+        (code, data_type)).fetchone()
     if row is None:
         return False
     updated = datetime.fromisoformat(row["updated_at"])
@@ -261,6 +320,131 @@ def _write_kline_cache(conn: sqlite3.Connection, code: str, df: pd.DataFrame) ->
             "VALUES (?, 'kline', ?)",
             (code, datetime.now().isoformat(timespec="seconds")),
         )
+
+
+# ---------------------------------------------------------------------------
+# 估值历史（P2 新增）：AKShare 拉取 + SQLite 缓存
+# ---------------------------------------------------------------------------
+def _normalize_valuation(pe_df: pd.DataFrame, pb_df: pd.DataFrame,
+                         code: str) -> pd.DataFrame:
+    """将百度股市通 PE/PB 两个时间序列合并为标准估值表
+
+    合并规则：两个接口调用返回的日期集合可能不完全一致，按日期外连接
+    （缺失侧为 NULL）；值转 Decimal 字符串；按日期升序去重。
+    """
+    pe_s = pe_df.rename(columns={"date": "trade_date", "value": "pe"})
+    pb_s = pb_df.rename(columns={"date": "trade_date", "value": "pb"})
+    # merge 前统一把日期转字符串，避免 datetime.date 与 str 混合导致对齐失败
+    pe_s["trade_date"] = pe_s["trade_date"].map(lambda d: str(d)[:10])
+    pb_s["trade_date"] = pb_s["trade_date"].map(lambda d: str(d)[:10])
+    merged = pd.merge(pe_s, pb_s, on="trade_date", how="outer")
+    for col in _VALUATION_COLUMNS:
+        merged[col] = merged[col].map(_to_decimal_str)
+    merged = merged.sort_values("trade_date").drop_duplicates(subset=["trade_date"], keep="last")
+    merged.reset_index(drop=True, inplace=True)
+    return merged
+
+
+def _fetch_valuation_history(code: str, period: str) -> pd.DataFrame:
+    """调用 AKShare 获取个股 PE(TTM)/PB 历史序列（百度股市通口径）
+
+    一次调用只返回一个指标序列（date/value 两列），此处分别拉取 PE 与 PB
+    后按日期合并；接口为 AKShare 1.18.x 提供的 stock_zh_valuation_baidu，
+    若缺失则抛明确错误提示升级。
+    """
+    if ak is None:
+        raise DataFetchError("AKShare 未安装，请先执行: pip install akshare")
+    fetch_fn = getattr(ak, "stock_zh_valuation_baidu", None)
+    if fetch_fn is None:
+        raise DataFetchError(
+            "当前 AKShare 版本不支持 stock_zh_valuation_baidu 估值接口，"
+            "请升级: pip install -U akshare")
+    pe_df = fetch_fn(symbol=code, indicator=_VALUATION_INDICATORS["pe"], period=period)
+    pb_df = fetch_fn(symbol=code, indicator=_VALUATION_INDICATORS["pb"], period=period)
+    return _normalize_valuation(pe_df, pb_df, code)
+
+
+def _read_valuation_cache(conn: sqlite3.Connection, code: str,
+                          start_date: Optional[str] = None,
+                          end_date: Optional[str] = None) -> pd.DataFrame:
+    """从 SQLite 读取缓存估值序列（可按日期范围过滤）；pe/pb 还原为 Decimal"""
+    sql = "SELECT trade_date, pe, pb FROM valuation WHERE code = ?"
+    params: list = [code]
+    if start_date:
+        sql += " AND trade_date >= ?"
+        params.append(start_date)
+    if end_date:
+        sql += " AND trade_date <= ?"
+        params.append(end_date)
+    sql += " ORDER BY trade_date"
+    df = pd.read_sql_query(sql, conn, params=params)
+    for col in _VALUATION_COLUMNS:
+        df[col] = df[col].map(lambda s: Decimal(s) if s is not None else None)
+    return df
+
+
+def _write_valuation_cache(conn: sqlite3.Connection, code: str,
+                           df: pd.DataFrame) -> None:
+    """全量覆盖写入指定标的的估值缓存，并刷新缓存元信息（data_type='valuation'）"""
+    rows = [
+        # pe/pb 为可选列（某日可能缺某个指标），缺失时存 NULL；负值合法
+        (code, str(row.trade_date)[:10],
+         str(getattr(row, "pe", None)) if getattr(row, "pe", None) is not None else None,
+         str(getattr(row, "pb", None)) if getattr(row, "pb", None) is not None else None)
+        for row in df.itertuples(index=False)
+    ]
+    with conn:  # 事务：删除旧数据 -> 写入新数据 -> 更新时间戳
+        conn.execute("DELETE FROM valuation WHERE code = ?", (code,))
+        conn.executemany(
+            "INSERT INTO valuation (code, trade_date, pe, pb) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO cache_meta (code, data_type, updated_at) "
+            "VALUES (?, 'valuation', ?)",
+            (code, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def get_valuation_history(code: str, start_date: Optional[str] = None,
+                          end_date: Optional[str] = None,
+                          refresh: bool = False) -> pd.DataFrame:
+    """获取个股估值历史 PE(TTM)/PB（优先读缓存，过期或无数据时调用 AKShare 并更新缓存）
+
+    :param code: 证券代码（如 000001）
+    :param start_date: 起始日期（YYYY-MM-DD，可选）
+    :param end_date: 截止日期（YYYY-MM-DD，可选）
+    :param refresh: True 时忽略缓存新鲜度，强制从 AKShare 拉取并更新缓存
+    :return: DataFrame，列为 trade_date/pe/pb，值为 Decimal（缺失为 None）
+    :raises DataFetchError: 拉取失败且无任何缓存可降级时抛出
+    """
+    settings = config.get_settings()
+    expire_days = settings.operation.cache_expire_days
+    retry_times = settings.operation.data_retry_times
+    period = settings.operation.valuation_history_period
+    conn = _get_connection()
+
+    # 1) 缓存命中且新鲜 -> 直接返回（按需过滤日期范围）
+    if not refresh and _is_cache_fresh(conn, code, expire_days, data_type="valuation"):
+        cached = _read_valuation_cache(conn, code, start_date, end_date)
+        if not cached.empty:
+            return cached
+
+    # 2) 缓存过期或无数据 -> 调用 AKShare（带重试）并更新缓存
+    try:
+        fresh = _fetch_with_retry(lambda: _fetch_valuation_history(code, period), retry_times)
+    except DataFetchError:
+        # 3) 降级：拉取失败但存在历史缓存（即使已过期）-> 返回并告警
+        cached = _read_valuation_cache(conn, code, start_date, end_date)
+        if not cached.empty:
+            print(f"[data_layer] 警告：估值数据拉取失败，已降级返回 {code} 的过期缓存")
+            return cached
+        raise
+
+    if fresh.empty:
+        raise DataFetchError(f"AKShare 返回空估值数据: {code}")
+    _write_valuation_cache(conn, code, fresh)
+    return _read_valuation_cache(conn, code, start_date, end_date)
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +515,21 @@ def _self_check() -> None:
     conn.commit()
     assert back.loc[0, "close"] == Decimal("10.35"), "Decimal 精度保持失败"
     print(f"[OK] 缓存读写闭环验证通过（close 精度保持: {back.loc[0, 'close']}）")
-    print(f"[OK] 真实拉取请调用: get_kline('sh000300', is_index=True)")
+    # 修正记录（P2）：自检补充估值表写入 -> 读取闭环验证（pe/pb Decimal 精度保持）
+    demo_val = pd.DataFrame([{
+        "trade_date": "2026-08-21", "pe": "5.20", "pb": "0.60",
+    }])
+    _write_valuation_cache(conn, "_demo", demo_val)
+    back_val = _read_valuation_cache(conn, "_demo")
+    conn.execute("DELETE FROM valuation WHERE code = '_demo'")
+    conn.execute("DELETE FROM cache_meta WHERE code = '_demo' AND data_type = 'valuation'")
+    conn.commit()
+    assert back_val.loc[0, "pe"] == Decimal("5.20"), "估值 pe Decimal 精度保持失败"
+    assert back_val.loc[0, "pb"] == Decimal("0.60"), "估值 pb Decimal 精度保持失败"
+    print(f"[OK] 估值缓存读写闭环验证通过（pe/pb 精度保持: "
+          f"{back_val.loc[0, 'pe']} / {back_val.loc[0, 'pb']}）")
+    print(f"[OK] 真实拉取请调用: get_kline('sh000300', is_index=True) 或 "
+          f"get_valuation_history('000001')")
 
 
 if __name__ == "__main__":

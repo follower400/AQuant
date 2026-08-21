@@ -61,10 +61,19 @@ _ENV_ENCODINGS = ("utf-8", "gbk")
 #   FACTOR    正倍数（Decimal，可大于 1，如量能倍数 1.2）
 #   LIST_INT  严格递增的正整数列表
 #   LIST_STR  非空字符串列表
+#   CHOICE    限定枚举字符串（可选值见 _CHOICES，P2 新增）
 # ---------------------------------------------------------------------------
-_INT, _BOOL, _LEVEL, _RATIO, _PRICE, _FACTOR, _LIST_INT, _LIST_STR = (
+_INT, _BOOL, _LEVEL, _RATIO, _PRICE, _FACTOR, _LIST_INT, _LIST_STR, _CHOICE = (
     "INT", "BOOL", "LEVEL", "RATIO", "PRICE", "FACTOR", "LIST_INT", "LIST_STR",
+    "CHOICE",
 )
+
+# 枚举型字段的可选值表：{(section, field): 允许值集合}
+_CHOICES: Dict[Tuple[str, str], Tuple[str, ...]] = {
+    ("operation", "valuation_history_period"): (
+        "近一年", "近三年", "近五年", "近十年", "全部",
+    ),
+}
 
 _RULES: Dict[str, Dict[str, str]] = {
     "market_regime": {
@@ -149,6 +158,7 @@ _RULES: Dict[str, Dict[str, str]] = {
         "rebalance_monthly": _BOOL,
         "data_retry_times": _INT,
         "cache_expire_days": _INT,
+        "valuation_history_period": _CHOICE,
     },
 }
 
@@ -224,6 +234,11 @@ def _coerce_field(section: str, field: str, value: Any, kind: str) -> Any:
                 raise ValueError("必须为非空列表")
             if not all(isinstance(x, str) and x.strip() for x in value):
                 raise ValueError("必须为非空字符串列表")
+            return value
+        if kind == _CHOICE:
+            allowed = _CHOICES.get((section, field), ())
+            if value not in allowed:
+                raise ValueError(f"必须为 {list(allowed)} 之一")
             return value
     except (TypeError, ValueError) as e:
         raise ConfigError(f"settings.yaml [{section}.{field}] 非法: {e}") from e
