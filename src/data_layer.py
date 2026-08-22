@@ -222,6 +222,15 @@ def _normalize_kline(df: pd.DataFrame, code: str) -> pd.DataFrame:
     df["volume"] = df["volume"].astype(float)
     df = df.sort_values("trade_date").drop_duplicates(subset=["trade_date"], keep="last")
     df.reset_index(drop=True, inplace=True)
+
+    # 修正记录（P2 冒烟测试）：新浪前复权序列早期存在非正收盘价（实测 000001
+    # 1991 年复权价为 -3.08 且含 0 值行），非正价格无收益意义，且会导致因子层
+    # 收益率计算除零（DivisionByZero）崩溃；落库前过滤。
+    # 影响面：仅 data_layer 数据清洗路径，正常正价数据不受影响。
+    valid = df["close"].map(lambda s: s is not None and Decimal(s) > 0)
+    if not valid.all():
+        print(f"[data_layer] 清洗非正收盘价 {int((~valid).sum())} 行（code={code}）")
+        df = df[valid].reset_index(drop=True)
     return df
 
 
@@ -331,6 +340,10 @@ def _read_kline_cache(conn: sqlite3.Connection, code: str,
     df = pd.read_sql_query(sql, conn, params=params)
     for col in _PRICE_COLUMNS:
         df[col] = df[col].map(lambda s: Decimal(s) if s is not None else None)
+    # 修正记录（P2 冒烟测试）：P1 旧缓存可能含非正收盘价脏数据（新浪前复权早期
+    # 复权价为负/为 0），读取时过滤，与 _normalize_kline 写侧过滤互为兜底；
+    # 影响面：读取路径返回的数据恒为正价，样本量略减不影响 MA250 等窗口指标。
+    df = df[df["close"].map(lambda v: v is not None and v > 0)].reset_index(drop=True)
     return df
 
 

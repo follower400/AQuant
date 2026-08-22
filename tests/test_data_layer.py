@@ -117,6 +117,30 @@ class TestCacheRoundtrip:
 
 
 # ---------------------------------------------------------------------------
+# P2 冒烟修正：非正收盘价脏数据过滤（新浪前复权早期数据为负/为 0）
+# ---------------------------------------------------------------------------
+class TestNormalizeKline:
+    def test_non_positive_close_filtered(self):
+        """写缓存前应过滤非正收盘行（0 价/负价脏数据），正价数据保留"""
+        df = make_kline_df(5)
+        df.loc[1, "close"] = Decimal("0")       # 0 价脏行
+        df.loc[2, "close"] = Decimal("-3.08")   # 负价脏行（前复权早期数据）
+        out = dl._normalize_kline(df, "000001")
+        assert len(out) == 3                     # 5 行过滤 2 行
+        # normalize 输出为落库字符串格式，转 Decimal 后验证全为正价
+        assert out["close"].map(lambda s: Decimal(s) > 0).all()
+
+    def test_read_cache_filters_legacy_dirty_rows(self, fresh_db):
+        """P1 旧缓存含非正收盘价时，读取路径应自动过滤（净化历史脏数据）"""
+        df = make_kline_df(5)
+        df.loc[1, "close"] = Decimal("0")
+        dl._write_kline_cache(fresh_db, "000001", df)  # 直接写脏数据入库（模拟旧缓存）
+        back = dl._read_kline_cache(fresh_db, "000001")
+        assert len(back) == 4                     # 脏行被读取路径过滤
+        assert (back["close"] > 0).all()
+
+
+# ---------------------------------------------------------------------------
 # 缓存新鲜度
 # ---------------------------------------------------------------------------
 class TestCacheFreshness:

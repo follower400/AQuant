@@ -247,8 +247,13 @@ def annualized_volatility(df: pd.DataFrame, window: Optional[int] = None,
         window = n
 
     # 逐日收益率（Decimal）
+    # 修正记录（P2 冒烟测试）：真实前复权数据含非正收盘价，除以前价为 0 时抛
+    # DivisionByZero；现对非正价格直接记为缺失（无收益意义，不参与波动率统计），
+    # 影响面：仅 annualized_volatility 对脏数据的容忍度，正常正价数据行为不变。
     returns: List[Optional[Decimal]] = [None] * n
     for i in range(1, n):
+        if prices[i] <= 0 or prices[i - 1] <= 0:
+            continue  # 非正价格（前复权脏数据）不产生收益率，保守记为缺失
         returns[i] = prices[i] / prices[i - 1] - Decimal(1)
 
     out: List[Optional[Decimal]] = [None] * n

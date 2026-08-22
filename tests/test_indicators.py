@@ -189,6 +189,17 @@ class TestVolatility:
         assert df["volatility"].iloc[-1] is not None
         assert df["volatility"].iloc[1] is None  # 窗口内不足 2 个样本
 
+    def test_non_positive_prices_skipped(self):
+        """含 0 价/负价脏数据（真实前复权序列）不崩溃，非正价格收益记为缺失
+
+        修正记录（P2 冒烟测试）：000001 新浪前复权早期数据为负/为 0，旧实现
+        除零崩溃（DivisionByZero）；现跳过非正价格，窗口内正价收益正常统计。
+        """
+        df = make_df([0, -3, 5, 10, 12, 11])
+        annualized_volatility(df)
+        assert df["volatility"].iloc[-1] is not None  # [10->12, 12->11] 两笔收益参与
+        assert df["volatility"].iloc[1] is None       # 非正价格处收益缺失
+
 
 # ---------------------------------------------------------------------------
 # 最大回撤
