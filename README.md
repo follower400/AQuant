@@ -30,7 +30,7 @@
 | 层级 | 工具/库 | 用途 |
 | :--- | :--- | :--- |
 | **开发环境** | VS Code + Continue/Cline | AI 辅助编程，管控代码生成质量 |
-| **数据源** | AKShare | 获取实时行情、财务数据、估值分位 |
+| **数据源** | AKShare（东方财富 + 新浪备用源自动降级） | 获取实时行情、财务数据、估值分位 |
 | **指标计算** | Pandas, NumPy | 向量化计算 MA、RSI、MACD 等因子 |
 | **大模型** | 阿里云百炼 (通义千问 Qwen) | 将枯燥的指标转化为自然语言分析报告 |
 | **任务调度** | Ubuntu (VMware) + Crontab | 每日定时（如 9:40、14:40）唤醒主程序 |
@@ -43,6 +43,7 @@
 AI-Quant-Assistant/
 ├── .env                           # 敏感环境变量（API Key，严禁提交至 Git）
 ├── .gitignore                     # Git 忽略规则
+├── pytest.ini                    # pytest 配置（注册 smoke 标记，日常默认跳过）
 ├── README.md                      # 项目总览（本文件）
 ├── requirements.txt               # Python 依赖包列表
 │
@@ -51,26 +52,24 @@ AI-Quant-Assistant/
 │
 ├── docs/                          # 文档目录
 │   ├── strategy_prd.md            # 策略详细需求文档（已定稿）
-│   └── project_plan.md            # 项目工程实施计划（任务拆解蓝图）
+│   └── project_plan.md            # 项目工程实施计划（任务拆解蓝图 + 错误总结）
 │
-├── src/                           # 核心源代码
-│   ├── data_layer/                # 数据获取层
-│   │   └── data_fetcher.py        # 封装 AKShare，获取 K 线与估值
-│   ├── factor_layer/              # 因子计算层
-│   │   └── indicators.py          # MA、MACD、RSI、回撤、分位点计算（使用 Decimal）
-│   ├── strategy_layer/            # 策略逻辑层
-│   │   ├── market_regime.py       # 市场景气度判定
-│   │   ├── tech_screener.py       # 科技股选股与分批建仓条件
-│   │   └── etf_screener.py        # 金融股与 ETF 筛选逻辑
-│   ├── ai_layer/                  # AI 交互层
-│   │   └── ai_analyzer.py         # 调用百炼 API，生成结构化评价
-│   ├── notify_layer/              # 通知层
-│   │   └── wechat_pusher.py       # 封装 PushPlus 微信推送
+├── src/                           # 核心源代码（严格遵循分层架构）
+│   ├── data_layer.py              # 数据层：AKShare 封装 + SQLite 缓存 + 非正价净化
+│   ├── indicators.py              # 因子层：MA/MACD/RSI/年化波动率/回撤/估值分位
+│   ├── market_regime.py           # 策略层 L3：宏观景气判定 + 全局风控开关
+│   ├── stock_screener.py          # 策略层 L3：科技股初筛（PRD 2.1 六条件全逻辑）
+│   ├── position_sizing.py         # 策略层 L3：分批建仓 + 底仓决策 + 三层上限校验
 │   └── main.py                    # 程序主入口（编排上述模块）
 │
-├── tests/                         # 单元测试目录
-│   ├── test_indicators.py         # 针对核心因子的 Pytest 用例
-│   └── test_strategy_logic.py     # 针对买卖信号的逻辑测试
+├── tests/                         # 单元测试与冒烟测试目录
+│   ├── conftest.py                # pytest 共享配置（sys.path 注册）
+│   ├── test_data_layer.py         # 数据层缓存读写闭环 + 新鲜度 + Schema
+│   ├── test_indicators.py         # 因子计算层精度验证（含脏数据防御测试）
+│   ├── test_market_regime.py      # 宏观景气判定 + 风控五开关
+│   ├── test_stock_screener.py     # 科技股选股单票评估（白名单/回撤/涨停等）
+│   ├── test_position_sizing.py    # 仓位决策 + 上限校验（三批触发/暂停/加速）
+│   └── test_smoke.py              # P1+P2 主链路冒烟测试（访问真实 AKShare 数据源）
 │
 └── joinquant/                     # 聚宽回测脚本（与本地代码解耦）
     └── backtest_research.ipynb    # 在聚宽研究环境运行的验证脚本
@@ -102,8 +101,11 @@ SIMULATED_TOTAL_CAPITAL=1000000
 
 ### 4. 运行本地测试
 ```bash
-# 运行所有单元测试，确保核心因子计算准确
+# 运行所有离线单元测试（默认跳过冒烟测试，保持回归快速）
 pytest tests/
+
+# 显式运行冒烟测试（串连 P1+P2 主链路，访问真实 AKShare 数据源）
+pytest -m smoke -v
 
 # 手动运行一次主程序（不依赖定时任务）
 python src/main.py
@@ -121,19 +123,21 @@ python src/main.py
 
 本项目严格遵循根目录下 `.coderule` 文件的要求：
 1. **严禁使用 Float**：金额、价格必须使用 `Decimal`。
-2. **测试驱动**：新增因子必须附带单元测试。
+2. **测试驱动**：新增因子必须附带单元测试；主链路必须有冒烟测试（`pytest -m smoke`）。
 3. **禁止占位符**：不允许出现 `pass` 或 `# TODO`，代码必须立即生效。
 4. **安全底线**：禁止硬编码 API Key，一律通过 `.env` 读取。
+5. **报错标注**：每次修正 bug 必须在代码处标注修正记录，注明问题、影响面和改进措施。
 
 ## 🗺️ 项目路线图 (Roadmap)
 
 - [x] 需求分析与策略 PRD 定稿
 - [x] 项目工程结构搭建
 - [x] 阿里云百炼 API 连通性验证
-- [ ] 数据层与因子层代码编写 (Phase 1)
-- [ ] 策略信号逻辑工程化 (Phase 2)
-- [ ] AI 提示词工程与端到端联调 (Phase 3)
-- [ ] Ubuntu 服务器定时任务部署 (Phase 4)
+- [x] 数据层与因子层代码编写（Phase 1）
+- [x] 策略信号逻辑工程化（market_regime / stock_screener / position_sizing）（Phase 2）
+- [x] 估值历史分位与冒烟测试（P2 配套）
+- [ ] AI 提示词工程与端到端联调（Phase 3）
+- [ ] Ubuntu 服务器定时任务部署（Phase 4）
 
 ## ⚠️ 免责声明 (Disclaimer)
 

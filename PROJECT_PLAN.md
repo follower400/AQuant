@@ -2,7 +2,7 @@
 
 ## 0. 当前进度（每完成一个 Phase 更新一次）
 
-> 最近更新：2026-08-21（完成 Phase 1 数据基建与因子库，进入 Phase 2）
+> 最近更新：2026-08-22（完成 Phase 2 策略信号层 + 冒烟测试 + 配套修正）
 
 | 阶段 | 任务 | 状态 |
 | :--- | :--- | :--- |
@@ -15,8 +15,10 @@
 | Phase 0 | SQLite 本地缓存模块（AKShare 降级读取） | ✅ 已完成 |
 | Phase 1 | 数据层 `src/data_layer.py`（AKShare 封装 + SQLite 缓存，沪深300/个股） | ✅ 已完成 |
 | Phase 1 | 因子库 `src/indicators.py`（MA/MACD/RSI/年化波动率/回撤，Decimal 精度） | ✅ 已完成 |
-| Phase 1 | Pytest 单元测试（tests/，41 个用例全部通过，含真实数据链路验证） | ✅ 已完成 |
-| Phase 2 | 策略信号逻辑（market_regime / stock_screener / position_sizing） | ⏳ 未开始（下一步） |
+| Phase 1 | Pytest 单元测试（tests/，139 个用例全部通过，含真实数据链路验证） | ✅ 已完成 |
+| Phase 2 | 策略信号逻辑（market_regime / stock_screener / position_sizing） | ✅ 已完成 |
+| Phase 2 | 估值历史分位（valuation_percentile + AKShare 备用数据源 + 脏数据净化） | ✅ 已完成 |
+| Phase 2 | 冒烟测试（P1+P2 主链路 smoke 标记，pytest.ini 默认跳过） | ✅ 已完成 |
 | Phase 3 | AI 提示词工程与 JSON Schema 校验 | ⏳ 未开始 |
 | Phase 4 | 端到端联调（Ubuntu Crontab + 微信推送） | ⏳ 未开始 |
 | Phase 5 | 本地回测闭环（vectorbt 调参验证） | ⏳ 未开始 |
@@ -52,10 +54,14 @@
 - **Phase 1：数据基建与因子库（预计 2 天）**
   - 封装 `AKShare` 获取沪深 300 和行业 ETF 数据。
   - 编写 `indicators.py`，实现 MA、MACD、RSI、最大回撤、年化波动率、PB/PE 分位函数（参数从 Layer 0 读取）。
-- **Phase 2：策略逻辑工程化（预计 3 天）**
+- **Phase 2：策略逻辑工程化（预计 3 天）** — 实际耗时约 1.5 天
   - 实现 `market_regime.py`（判定景气/低落/减仓触发）。
   - 实现 `stock_screener.py`（按 1-20 元、行业白名单、回撤、波动率区间初筛）。
   - 实现 `position_sizing.py`（计算 30%/30%/40% 触发条件与仓位上限校验）。
+  - 新增 `valuation_percentile`（估值分位函数）及百度股市通接口适配。
+  - data_layer.py 个股 K 线新增新浪备用源（东财源反爬风险自动降级）。
+  - P2 冒烟测试发现真实前复权脏数据导致除零崩溃，已在 data_layer 层实施双端净化（写侧过滤 + 读侧兜底），indicators.py 增加非正价防御逻辑。
+  - 编写 pytest.ini 注册冒烟标记，日常回归保持离线快速运行。
 - **Phase 3：AI 提示词工程（预计 1 天）**
   - 设计结构化 Prompt（要求 AI 严格按 JSON 格式返回评级和理由，便于解析）。
   - 实现输出 JSON Schema 校验与失败降级（发送纯量化信号，不阻塞主流程）。
@@ -78,3 +84,35 @@
 - **数据源失效**：若 AKShare 宕机，程序自动重试 3 次；仍失败则降级读取 SQLite 缓存数据并发送告警微信，缓存过期超过阈值则静默退出。
 - **AI 解析失败**：若百炼 API 超时或返回内容未通过 JSON Schema 校验，直接发送“纯量化信号”的文本，不阻塞主流程。
 - **配置校验失败**：settings.yaml 缺失或校验不通过时，程序启动即报错退出并推送告警，严禁携带默认参数运行（防止静默产生错误交易信号）。
+
+## 8. 错误总结（P1 + P2 测试阶段发现的问题与修复记录）
+
+以下所有修正均已在代码中按 `.coderrules` 要求标注了「修正记录」注释，注明修正问题、影响面及可能影响的模块。
+
+### 8.1 Phase 1：数据基建与因子层
+
+| # | 问题描述 | 根因 | 修复方案 | 影响文件 |
+|---|---------|------|---------|--------|
+| 1 | `config.py` 运行时 KeyError 抛错 | `settings.yaml` 新增 `valuation_history_period` 字段后 `config.py` 未同步处理，启动校验失败 | 在 `_SECTION_FIELDS` 注册新字段并完善类型定义 | config.py, settings.yaml |
+| 2 | pytest 无法收集测试用例 | conftest.py 未将项目根目录加入 sys.path，导致 src/ 下模块不可导入 | 按 .coderrules 模板更新 conftest.py | tests/conftest.py |
+| 3 | test_normalize_kline_by_ak 异常路径断言过严 | 东财源拉取失败时抛出 RuntimeError，非 DataFetchError | 修正断言为预期 RuntimeError 信息 | tests/test_data_layer.py |
+| 4 | _normalize_valuation 列类型断言错误 | merge 后 pe/pb 列类型为 str，Decimal 仅在 _read 阶段还原 | 修正断言验证类型转换逻辑 | tests/test_data_layer.py |
+| 5 | valuation_percentile 首次测试 1 failed | get_valuation_history 调用时缺少 period 参数，返回值无期约过滤 | 按 PRD 约定补齐 period 并完善测试用例 | tests/test_data_layer.py |
+
+### 8.2 Phase 2：策略信号层与冒烟测试
+
+| # | 问题描述 | 根因 | 修复方案 | 影响文件 |
+|---|---------|------|---------|--------|
+| 6 | `market_regime.py` ModuleNotFoundError（indicators 引用失败） | sys.path 注册模板仅加项目根目录，src 同目录模块互引失败 | 补充注册 src 目录自身（含修正记录） | market_regime.py, stock_screener.py, position_sizing.py |
+| 7 | annualized_volatility DivisionByZero 崩溃 | 真实前复权数据（000001 新浪源）早期存在非正收盘价（-3.08、0 值），收益率计算除零 | data_layer 写侧+读侧双端过滤非正价，indicators 对非正价格跳过收益统计 | data_layer.py, indicators.py |
+| 8 | 指数 K 线 amount 列 None 断言失败 | 新浪指数接口无成交额字段，amount 全为 None，冒烟断言过严 | 放宽断言（None 或 Decimal 合法），遵循 .coderrules 缺列边缘情况 | tests/test_smoke.py |
+| 9 | evaluate_stock 返回 price=None | data_layer 脏数据传播至 indicators → volatility 崩溃导致全票筛选失败 | 见第 7 项净化修复，clean cache 后冒烟 10 passed | — |
+| 10 | _pct(None) TypeError 崩溃 | valuation_percentile 分位缺失传 None 给 Decimal 乘算 | _pct 签名改为 Optional[Decimal]，None 显示 "-" | position_sizing.py |
+| 11 | 二笔仓位判定构造数据失败 | hist 放大不够导致 MACD 红柱放大条件不满足，mock 数据不合理 | 迭代脚本寻找合适构造值（close=17.8）使条件全部成立 | tests/test_position_sizing.py |
+| 12 | 三笔仓位判定 close 未严格大于 prev_high | mock 数据 close 恰好等于 12.9 = prev_high，未满足 > 条件 | 微调构造值（close=12.95）确保突破条件成立 | tests/test_position_sizing.py |
+
+### 8.3 经验教训与改进
+1. **AKShare 接口稳定性**：东方财富接口反爬策略升级频繁，已实现自动降级到新浪备用源，但仍需持续关注接口可用性变化。
+2. **前复权数据质量**：新浪源早期前复权数据存在历史性的负价/零价，这是除权算法的数学溢出效应，必须在因子层做防御性过滤。
+3. **Mock 数据设计原则**：自动化测试用例应经过手工演算验证（如二笔、三笔条件的 mock 数据），否则会掩盖真实路径 bug。
+4. **PowerShell 兼容性**：复杂参数的 python -c 命令在 PowerShell 中存在引号转义问题，已改用临时脚本文件方案（用完即删）。

@@ -16,6 +16,9 @@ dist/
 .coverage
 htmlcov/
 
+# ---- 临时诊断脚本（用完即删，防止误提交）----
+.tmp_*.py
+
 # ---- 虚拟环境 ----
 .venv/
 venv/
@@ -27,6 +30,10 @@ env/
 *.swp
 *.swo
 
+# ---- 项目配置文件（按需跟踪）----
+.coderrules
+pytest.ini
+
 # ---- 本地数据与日志（AKShare 缓存、SQLite、回测产物）----
 data/
 cache/
@@ -34,6 +41,7 @@ cache/
 *.sqlite
 *.log
 backtest_output/
+market_cache.db
 
 # ---- 系统文件 ----
 .DS_Store
