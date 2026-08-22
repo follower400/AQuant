@@ -237,13 +237,48 @@ def _fetch_index_daily(index_code: str) -> pd.DataFrame:
 
 
 def _fetch_stock_daily(stock_code: str, adjust: str = "qfq") -> pd.DataFrame:
-    """调用 AKShare 获取个股日线（默认前复权）"""
+    """调用 AKShare 获取个股日线（默认前复权）
+
+    修正记录（P2）：东财接口 stock_zh_a_hist 存在反爬风险（实测会抛
+    RemoteDisconnected），失败时自动降级新浪备用源 stock_zh_a_daily；
+    影响面：仅个股 K 线拉取路径，指数路径与缓存逻辑不变。
+    """
     if ak is None:
         raise DataFetchError("AKShare 未安装，请先执行: pip install akshare")
-    raw = ak.stock_zh_a_hist(
-        symbol=stock_code, period="daily",
-        start_date="19900101", end_date="20500101", adjust=adjust,
-    )
+    try:
+        raw = ak.stock_zh_a_hist(
+            symbol=stock_code, period="daily",
+            start_date="19900101", end_date="20500101", adjust=adjust,
+        )
+        return _normalize_kline(raw, stock_code)
+    except Exception as e:
+        print(f"[data_layer] 东财个股接口失败，降级新浪备用源: {e}")
+        return _fetch_stock_daily_sina(stock_code, adjust)
+
+
+def _sina_symbol(stock_code: str) -> str:
+    """纯数字代码转新浪格式（带交易所前缀）：60/68->sh，00/30->sz，其余北交所->bj"""
+    if stock_code.startswith(("60", "68")):
+        return f"sh{stock_code}"
+    if stock_code.startswith(("00", "30")):
+        return f"sz{stock_code}"
+    return f"bj{stock_code}"
+
+
+def _fetch_stock_daily_sina(stock_code: str, adjust: str = "qfq") -> pd.DataFrame:
+    """新浪备用源获取个股日线（stock_zh_a_daily，需 sz/sh/bj 前缀）
+
+    修正记录（P2）：东财接口反爬时的降级方案；接口缺失时抛明确升级提示。
+    """
+    if ak is None:
+        raise DataFetchError("AKShare 未安装，请先执行: pip install akshare")
+    fetch_fn = getattr(ak, "stock_zh_a_daily", None)
+    if fetch_fn is None:
+        raise DataFetchError(
+            "当前 AKShare 版本不支持 stock_zh_a_daily 备用源，"
+            "请升级: pip install -U akshare")
+    raw = fetch_fn(symbol=_sina_symbol(stock_code),
+                   start_date="19900101", end_date="20500101", adjust=adjust)
     return _normalize_kline(raw, stock_code)
 
 
