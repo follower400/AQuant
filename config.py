@@ -62,10 +62,11 @@ _ENV_ENCODINGS = ("utf-8", "gbk")
 #   LIST_INT  严格递增的正整数列表
 #   LIST_STR  非空字符串列表
 #   CHOICE    限定枚举字符串（可选值见 _CHOICES，P2 新增）
+#   STR       非空字符串（P3 新增，用于模型名称等单字符串字段）
 # ---------------------------------------------------------------------------
-_INT, _BOOL, _LEVEL, _RATIO, _PRICE, _FACTOR, _LIST_INT, _LIST_STR, _CHOICE = (
+_INT, _BOOL, _LEVEL, _RATIO, _PRICE, _FACTOR, _LIST_INT, _LIST_STR, _CHOICE, _STR = (
     "INT", "BOOL", "LEVEL", "RATIO", "PRICE", "FACTOR", "LIST_INT", "LIST_STR",
-    "CHOICE",
+    "CHOICE", "STR",
 )
 
 # 枚举型字段的可选值表：{(section, field): 允许值集合}
@@ -160,6 +161,16 @@ _RULES: Dict[str, Dict[str, str]] = {
         "cache_expire_days": _INT,
         "valuation_history_period": _CHOICE,
     },
+    # P3 新增：AI 解读层配置（模型代理池 + 超时 + 开关）
+    "ai": {
+        "enable_ai_analysis": _BOOL,
+        "primary_model": _STR,           # 主力模型 ID（如 qwen3.8-max）
+        "fallback_models": _LIST_STR,    # 降级备用模型列表
+        "max_retries_per_model": _INT,
+        "timeout_seconds": _INT,
+        "max_tokens": _INT,
+        "temperature": _RATIO,           # 0~1 浮点，复用 RATIO 校验
+    },
 }
 
 
@@ -240,6 +251,10 @@ def _coerce_field(section: str, field: str, value: Any, kind: str) -> Any:
             if value not in allowed:
                 raise ValueError(f"必须为 {list(allowed)} 之一")
             return value
+        if kind == _STR:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("必须为非空字符串")
+            return value.strip()
     except (TypeError, ValueError) as e:
         raise ConfigError(f"settings.yaml [{section}.{field}] 非法: {e}") from e
     raise ConfigError(f"settings.yaml [{section}.{field}] 未知校验类型: {kind}")
@@ -381,6 +396,11 @@ class Settings:
         """PushPlus 微信推送 Token，未配置时为 None（推送降级为控制台输出）"""
         return self.env["pushplus_token"]
 
+    @property
+    def enable_ai_analysis(self) -> bool:
+        """AI 分析总开关（P3 新增）：False 时跳过 AI 层，直接输出纯量化信号"""
+        return self.ai.enable_ai_analysis
+
 
 # ---------------------------------------------------------------------------
 # 加载入口
@@ -445,6 +465,11 @@ def _self_check() -> None:
     print(f"[OK] 阿里云百炼 Key: {'已配置' if s.dashscope_api_key else '未配置'} | "
           f"Base URL: {'已配置' if s.dashscope_base_url else '未配置'}")
     print(f"[OK] PushPlus Token: {'已配置' if s.pushplus_token else '未配置'}")
+    # P3 新增：AI 层配置摘要（不打印 API Key）
+    print(f"[OK] AI 分析开关: {'开启' if s.enable_ai_analysis else '关闭'} | "
+          f"主力模型: {s.ai.primary_model} | 备用: {s.ai.fallback_models}")
+    print(f"[OK] AI 超时: {s.ai.timeout_seconds}s | 重试: {s.ai.max_retries_per_model}/模型 | "
+          f"温度: {s.ai.temperature} | max_tokens: {s.ai.max_tokens}")
 
 
 if __name__ == "__main__":

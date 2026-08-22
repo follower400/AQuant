@@ -21,8 +21,11 @@ python-dotenv>=1.0.1
 # ---- Layer 4/5 网络层：百炼 API、PushPlus 微信推送 ----
 requests>=2.31.0
 
-# ---- Layer 4 AI 层：阿里云百炼（OpenAI 兼容接口，Phase 3 使用） ----
+# ---- Layer 4 AI 层：阿里云百炼（OpenAI 兼容接口 + Pydantic-AI 结构化输出） ----
 openai>=1.40.0
+# pydantic-ai v2：Agent + output_type 自动 JSON 提取 / Schema 校验 / 重试
+# 安装方式：pip install pydantic-ai
+pydantic-ai>=2.0.0
 
 # ---- 测试（TDD）----
 pytest>=8.0.0

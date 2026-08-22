@@ -2,7 +2,7 @@
 
 ## 0. 当前进度（每完成一个 Phase 更新一次）
 
-> 最近更新：2026-08-22（完成 Phase 2 策略信号层 + 冒烟测试 + 配套修正）
+> 最近更新：2026-08-22（完成 Phase 3 AI 解读层：提示词工程 + 分层代理池 + Pydantic-AI 校验 + 配置开关 + 数据健康检查）
 
 | 阶段 | 任务 | 状态 |
 | :--- | :--- | :--- |
@@ -15,11 +15,12 @@
 | Phase 0 | SQLite 本地缓存模块（AKShare 降级读取） | ✅ 已完成 |
 | Phase 1 | 数据层 `src/data_layer.py`（AKShare 封装 + SQLite 缓存，沪深300/个股） | ✅ 已完成 |
 | Phase 1 | 因子库 `src/indicators.py`（MA/MACD/RSI/年化波动率/回撤，Decimal 精度） | ✅ 已完成 |
-| Phase 1 | Pytest 单元测试（tests/，139 个用例全部通过，含真实数据链路验证） | ✅ 已完成 |
+| Phase 1 | Pytest 单元测试（tests/，180 个用例全部通过，含真实数据链路验证） | ✅ 已完成 |
 | Phase 2 | 策略信号逻辑（market_regime / stock_screener / position_sizing） | ✅ 已完成 |
 | Phase 2 | 估值历史分位（valuation_percentile + AKShare 备用数据源 + 脏数据净化） | ✅ 已完成 |
 | Phase 2 | 冒烟测试（P1+P2 主链路 smoke 标记，pytest.ini 默认跳过） | ✅ 已完成 |
-| Phase 3 | AI 提示词工程与 JSON Schema 校验 | ⏳ 未开始 |
+| Phase 3 | AI 解读层（ai_layer.py：Prompt 去幻觉 + 分层代理池 + Pydantic-AI 校验 + 配置开关 + 数据健康检查） | ✅ 已完成 |
+| Phase 3 | AI 层单元测试（test_config_ai.py + test_ai_layer.py，41 个用例） | ✅ 已完成 |
 | Phase 4 | 端到端联调（Ubuntu Crontab + 微信推送） | ⏳ 未开始 |
 | Phase 5 | 本地回测闭环（vectorbt 调参验证） | ⏳ 未开始 |
 
@@ -62,9 +63,15 @@
   - data_layer.py 个股 K 线新增新浪备用源（东财源反爬风险自动降级）。
   - P2 冒烟测试发现真实前复权脏数据导致除零崩溃，已在 data_layer 层实施双端净化（写侧过滤 + 读侧兜底），indicators.py 增加非正价防御逻辑。
   - 编写 pytest.ini 注册冒烟标记，日常回归保持离线快速运行。
-- **Phase 3：AI 提示词工程（预计 1 天）**
-  - 设计结构化 Prompt（要求 AI 严格按 JSON 格式返回评级和理由，便于解析）。
-  - 实现输出 JSON Schema 校验与失败降级（发送纯量化信号，不阻塞主流程）。
+- **Phase 3：AI 提示词工程（预计 1 天）** — 实际耗时约 0.5 天
+  - 设计结构化 Prompt（去幻觉：仅基于传入的结构化量化指标，禁止引入实时市场情绪）。
+  - 实现分层代理池：主力 qwen3.8-max → deepseek-v4-pro-0813 → kimi-k3 → 无 AI 降级。
+  - 集成 pydantic-ai v2（output_type=StockAnalysis 自动 JSON 提取 + Schema 校验）。
+  - 批量调用：5 只股票一次 API 调用（节省 ~47% Token 成本）。
+  - settings.yaml 新增 ai 节（enable_ai_analysis 开关 + 模型池 + 超时参数）。
+  - config.py 新增 _STR 校验类型、enable_ai_analysis 属性。
+  - 数据健康检查函数（check_data_health）：空 DataFrame 提前拦截，防止下游崩溃。
+  - 全部失败时降级为纯量化信号（Markdown 格式），不阻塞主流程。
 - **Phase 4：端到端联调（预计 1 天）**
   - 在 Ubuntu 上运行主程序，测试微信能否收到含 AI 评论的推送。
 - **Phase 5：本地回测闭环（预计 2 天，可与 Phase 4 并行）**
@@ -111,7 +118,16 @@
 | 11 | 二笔仓位判定构造数据失败 | hist 放大不够导致 MACD 红柱放大条件不满足，mock 数据不合理 | 迭代脚本寻找合适构造值（close=17.8）使条件全部成立 | tests/test_position_sizing.py |
 | 12 | 三笔仓位判定 close 未严格大于 prev_high | mock 数据 close 恰好等于 12.9 = prev_high，未满足 > 条件 | 微调构造值（close=12.95）确保突破条件成立 | tests/test_position_sizing.py |
 
-### 8.3 经验教训与改进
+### 8.3 Phase 3：AI 解读层
+
+| # | 问题描述 | 根因 | 修复方案 | 影响文件 |
+|---|---------|------|---------|--------|
+| 13 | pydantic-ai v2 API 变更：`result_type` 已改为 `output_type` | pydantic-ai 从 v1 升级到 v2，Agent 参数名变更 | 使用 `output_type=StockAnalysis` 替代 `result_type` | ai_layer.py |
+| 14 | pydantic-ai v2 `OpenAIModel` 已改为 `OpenAIChatModel` | 模块重命名，旧导入路径失效 | 使用 `from pydantic_ai.models.openai import OpenAIChatModel` | ai_layer.py |
+| 15 | OpenAIChatModel 不接受 `base_url` 参数 | v2 改为通过 `OpenAIProvider(base_url=...)` 传入 | 显式构建 `OpenAIProvider` 后传入 `provider` 参数 | ai_layer.py |
+| 16 | test_all_candidates_have_error 断言文本不匹配 | 健康检查先于 Prompt 构建拦截，降级信号含「数据源异常」而非「无有效候选股票」 | 修正断言为 `数据源异常` | tests/test_ai_layer.py |
+
+### 8.4 经验教训与改进
 1. **AKShare 接口稳定性**：东方财富接口反爬策略升级频繁，已实现自动降级到新浪备用源，但仍需持续关注接口可用性变化。
 2. **前复权数据质量**：新浪源早期前复权数据存在历史性的负价/零价，这是除权算法的数学溢出效应，必须在因子层做防御性过滤。
 3. **Mock 数据设计原则**：自动化测试用例应经过手工演算验证（如二笔、三笔条件的 mock 数据），否则会掩盖真实路径 bug。

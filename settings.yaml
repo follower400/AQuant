@@ -114,3 +114,17 @@ operation:
   data_retry_times: 3           # AKShare 数据源失败重试次数
   cache_expire_days: 5          # SQLite 缓存过期天数（超过则静默退出）
   valuation_history_period: 近五年  # 个股估值历史拉取窗口（百度股市通 period 枚举：近一年/近三年/近五年/近十年/全部，P2 估值分位计算依赖近3年/近5年窗口）
+
+# ---------------------------------------------------------------------------
+# 6. AI 解读层 (Phase 3)
+# ---------------------------------------------------------------------------
+ai:
+  enable_ai_analysis: true      # AI 分析总开关（false = 跳过 AI 层，直接输出纯量化信号，回测时建议关闭）
+  primary_model: qwen3.8-max    # 主力模型（高性价比，优先消耗免费额度）
+  fallback_models:              # 降级顺序：主力限流/超时 -> 依次切换备用模型
+    - deepseek-v4-pro-0813      # 第一备用（更强但额度较贵）
+    - kimi-k3                   # 第二备用（响应快，Moonshot 额度）
+  max_retries_per_model: 2      # 每个模型内部最大重试次数
+  timeout_seconds: 15           # 单次 API 调用超时阈值（秒）
+  max_tokens: 2000              # 单次输出 token 上限（批量5只股票解读）
+  temperature: 0.3              # 低温度确保输出稳定，减少随机性
