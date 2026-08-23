@@ -125,6 +125,7 @@ ai:
     - deepseek-v4-pro-0813      # 第一备用（更强但额度较贵）
     - kimi-k3                   # 第二备用（响应快，Moonshot 额度）
   max_retries_per_model: 2      # 每个模型内部最大重试次数
-  timeout_seconds: 15           # 单次 API 调用超时阈值（秒）
+  timeout_seconds: 60           # 单次 API 调用超时阈值（秒）—— P4 修正：15s 对批量分析过短，改为 60s
   max_tokens: 2000              # 单次输出 token 上限（批量5只股票解读）
+  max_batch_size: 5             # 单次 AI 调用最大股票数（超出则分批调用后合并）
   temperature: 0.3              # 低温度确保输出稳定，减少随机性

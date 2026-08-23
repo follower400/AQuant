@@ -133,6 +133,7 @@ def _build_user_prompt(
         lines.append(f"- MACD DIF: {stock.get('macd_dif', 'N/A')}")
         lines.append(f"- MACD DEA: {stock.get('macd_dea', 'N/A')}")
         lines.append(f"- MACD 柱: {stock.get('macd_hist', 'N/A')}")
+        lines.append(f"- 距低点反弹: {stock.get('rebound_from_low', 'N/A')}")
         if stock.get("failures"):
             lines.append(f"- 未通过条件: {'; '.join(stock['failures'])}")
     return "\n".join(lines)
@@ -277,7 +278,12 @@ def _call_tiered(
             try:
                 result = agent.run_sync(
                     prompt,
-                    model_settings={"timeout": timeout},
+                    # 修正记录（P4）：qwen3.8-max 等思考模型在 thinking mode 下不支持
+                    # pydantic-ai 的 tool_choice=required（结构化输出依赖），需显式禁用。
+                    model_settings={
+                        "timeout": timeout,
+                        "extra_body": {"enable_thinking": False},
+                    },
                 )
                 return result.output, model_name, []
             except Exception as e:
@@ -343,7 +349,15 @@ def analyze(
             errors=issues,
         )
 
-    # 3) 构建 Prompt（仅包含有数据的候选股）
+    # 3) 构建候选数据（仅包含有数据的候选股）
+    # 修正记录（P4）：原 stock_dict 仅含 code/industry/price/pe_percentile，
+    # Prompt 模板期望的均线/RSI/MACD 等字段全部输出 N/A，导致 AI 误报「指标缺失」。
+    # 现从 StockCandidate 指标快照（evaluate_stock 回填）取真实数值。
+    def _fmt_field(cand, name: str) -> str:
+        """指标字段格式化：非空转字符串，缺失/属性不存在时输出 N/A"""
+        val = getattr(cand, name, None)
+        return "N/A" if val is None else str(val)
+
     candidates_data = []
     for c in candidates:
         if getattr(c, "error", None) is not None:
@@ -351,10 +365,18 @@ def analyze(
         stock_dict: Dict = {
             "code": c.code,
             "industry": c.industry,
-            "price": str(c.price) if c.price is not None else "N/A",
-            "pe_percentile": (str(c.pe_percentile)
-                              if getattr(c, "pe_percentile", None) is not None
-                              else "N/A"),
+            "price": _fmt_field(c, "price"),
+            "pe_percentile": _fmt_field(c, "pe_percentile"),
+            "rsi": _fmt_field(c, "rsi"),
+            "max_drawdown": _fmt_field(c, "max_drawdown"),
+            "volatility": _fmt_field(c, "volatility"),
+            "ma5": _fmt_field(c, "ma5"),
+            "ma10": _fmt_field(c, "ma10"),
+            "ma20": _fmt_field(c, "ma20"),
+            "macd_dif": _fmt_field(c, "macd_dif"),
+            "macd_dea": _fmt_field(c, "macd_dea"),
+            "macd_hist": _fmt_field(c, "macd_hist"),
+            "rebound_from_low": _fmt_field(c, "rebound_from_low"),
             "failures": getattr(c, "failures", []),
         }
         candidates_data.append(stock_dict)
@@ -367,9 +389,7 @@ def analyze(
             errors=["无有效候选股票"],
         )
 
-    user_prompt = _build_user_prompt(candidates_data, regime, risk_flags)
-
-    # 4) 分层代理池调用
+    # 4) 分层代理池构建（一次性构建，分批复用）
     try:
         agents = _build_agents()
     except RuntimeError as e:
@@ -381,29 +401,63 @@ def analyze(
             errors=[str(e)],
         )
 
+    # 5) 分批调用（P4 新增：max_batch_size 控制每批股票数，避免单次调用超时）
+    #    修正记录（P4）：原实现将全部候选股一次性发给 AI，12 只股票时 Prompt 过长，
+    #    qwen3.8-max 15s 超时无法完成。现按 max_batch_size 分批，逐批调用后合并结果。
     ai_cfg = settings.ai
-    result, used_model, errors = _call_tiered(
-        agents, user_prompt,
-        max_retries=ai_cfg.max_retries_per_model,
-        timeout=ai_cfg.timeout_seconds,
-    )
+    batch_size = ai_cfg.max_batch_size
+    batches = [candidates_data[i:i + batch_size]
+               for i in range(0, len(candidates_data), batch_size)]
 
-    # 5) 成功 → 返回 AI 结果
-    if result is not None:
+    all_recommendations: List = []
+    all_risk_warnings: List[str] = []
+    market_summaries: List[str] = []
+    used_models: set = set()
+    all_errors: List[str] = []
+    any_success = False
+
+    for batch_idx, batch in enumerate(batches):
+        user_prompt = _build_user_prompt(batch, regime, risk_flags)
+        result, used_model, errors = _call_tiered(
+            agents, user_prompt,
+            max_retries=ai_cfg.max_retries_per_model,
+            timeout=ai_cfg.timeout_seconds,
+        )
+        if result is not None:
+            any_success = True
+            used_models.add(used_model)
+            all_recommendations.extend(result.stock_recommendations)
+            all_risk_warnings.extend(result.risk_warnings)
+            market_summaries.append(result.market_summary)
+            print(f"[ai_layer] 批次 {batch_idx + 1}/{len(batches)} 成功"
+                  f"（模型: {used_model}，{len(result.stock_recommendations)} 只股票）")
+        else:
+            all_errors.extend(errors)
+            print(f"[ai_layer] 批次 {batch_idx + 1}/{len(batches)} 全部模型失败")
+
+    # 6) 合并结果：任一批次成功即返回 AI 结果（部分失败时仅包含成功批次的推荐）
+    if any_success:
+        merged = StockAnalysis(
+            stock_recommendations=all_recommendations,
+            market_summary=" | ".join(market_summaries),
+            risk_warnings=list(dict.fromkeys(all_risk_warnings)),  # 去重保序
+        )
         return AnalysisResult(
-            analysis=result, used_ai=True, used_model=used_model,
+            analysis=merged, used_ai=True,
+            used_model=", ".join(sorted(used_models)),
             degraded_signal="",
             candidates=candidates, regime=regime,
+            errors=all_errors,  # 保留失败批次的错误信息（供日志参考）
         )
 
-    # 6) 全部失败 → 降级
-    print(f"[ai_layer] 全部模型失败，降级为纯量化信号。错误: {errors}")
+    # 7) 全部批次失败 → 降级为纯量化信号
+    print(f"[ai_layer] 全部批次失败，降级为纯量化信号。错误: {all_errors}")
     return AnalysisResult(
         analysis=None, used_ai=False, used_model="",
         degraded_signal=_build_degraded_signal(
             candidates, regime, risk_flags),
         candidates=candidates, regime=regime,
-        errors=errors,
+        errors=all_errors,
     )
 
 

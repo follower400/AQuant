@@ -26,6 +26,17 @@ class FakeCandidate:
     passed: bool
     failures: List[str] = None
     error: Optional[str] = None
+    # 指标快照字段（P4 新增：与 StockCandidate 保持一致，缺省 None）
+    ma5: Optional[Decimal] = None
+    ma10: Optional[Decimal] = None
+    ma20: Optional[Decimal] = None
+    rsi: Optional[Decimal] = None
+    macd_dif: Optional[Decimal] = None
+    macd_dea: Optional[Decimal] = None
+    macd_hist: Optional[Decimal] = None
+    max_drawdown: Optional[Decimal] = None
+    volatility: Optional[Decimal] = None
+    rebound_from_low: Optional[Decimal] = None
 
     def __post_init__(self):
         if self.failures is None:
@@ -141,6 +152,61 @@ class TestPromptBuilding:
         """系统提示词应包含去幻觉规则"""
         assert "禁止引入" in ai._SYSTEM_PROMPT
         assert "仅使用提供的数据" in ai._SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Prompt 指标传值（P4 修正：验证候选快照数值真正进入 Prompt）
+# ---------------------------------------------------------------------------
+class TestIndicatorPrompt:
+    def test_prompt_contains_indicator_values(self, monkeypatch):
+        """Prompt 应包含候选股指标快照的真实数值（而非全部 N/A）"""
+        import config as cfg
+        fake_ai = cfg._Section({
+            "enable_ai_analysis": True,
+            "primary_model": "qwen3.8-max",
+            "fallback_models": [],
+            "max_retries_per_model": 1,
+            "timeout_seconds": 15,
+            "max_tokens": 2000,
+            "max_batch_size": 5,
+            "temperature": 0.3,
+        })
+
+        class FakeSettings:
+            enable_ai_analysis = True
+            ai = fake_ai
+            dashscope_api_key = "test-key"
+            dashscope_base_url = "https://test.com/v1"
+
+        monkeypatch.setattr(cfg, "get_settings", lambda: FakeSettings())
+
+        captured = {}
+
+        class CaptureAgent:
+            def run_sync(self, prompt, model_settings=None):
+                captured["prompt"] = prompt
+
+                class R:
+                    output = ai.StockAnalysis(
+                        stock_recommendations=[], market_summary="ok")
+                return R()
+
+        monkeypatch.setattr(ai, "_build_agents",
+                            lambda: [("model-a", CaptureAgent())])
+
+        df = pd.DataFrame({
+            "close": [Decimal("100")] * 10,
+            "trade_date": [f"2026-01-{i+1:02d}" for i in range(10)],
+        })
+        c = _make_candidate(ma5=Decimal("12.30"), macd_dif=Decimal("0.15"),
+                            rsi=Decimal("42.5"))
+        result = ai.analyze([c], "BULL", index_df=df)
+        assert result.used_ai is True
+        prompt = captured["prompt"]
+        assert "12.30" in prompt          # MA5 数值传入
+        assert "0.15" in prompt           # MACD DIF 数值传入
+        assert "42.5" in prompt           # RSI 数值传入
+        assert "N/A" in prompt            # 未提供的字段（如波动率）仍为 N/A，向后兼容
 
 
 # ---------------------------------------------------------------------------

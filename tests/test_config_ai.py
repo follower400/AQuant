@@ -68,8 +68,9 @@ def base_settings(tmp_path, monkeypatch):
             "primary_model": "qwen3.8-max",
             "fallback_models": ["deepseek-v4-pro-0813", "kimi-k3"],
             "max_retries_per_model": 2,
-            "timeout_seconds": 15,
+            "timeout_seconds": 60,
             "max_tokens": 2000,
+            "max_batch_size": 5,
             "temperature": 0.3,
         },
     }
@@ -97,7 +98,7 @@ class TestAISection:
         assert s.ai.primary_model == "qwen3.8-max"
         assert s.ai.fallback_models == ["deepseek-v4-pro-0813", "kimi-k3"]
         assert s.ai.max_retries_per_model == 2
-        assert s.ai.timeout_seconds == 15
+        assert s.ai.timeout_seconds == 60
         assert s.ai.max_tokens == 2000
         assert s.ai.temperature == Decimal("0.3")
 

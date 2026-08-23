@@ -56,6 +56,18 @@ class StockCandidate:
     price: Optional[Decimal]               # 最新收盘价
     pe_percentile: Optional[Decimal]       # PE 近 N 年分位（None 表示不可用）
     passed: bool                           # 是否通过全部初筛条件
+    # 最新指标快照（P4 修正：原仅保留初筛结论，指标用完即弃，导致 Layer 4 Prompt
+    # 中均线/RSI/MACD 等字段全部为 N/A；现回填供 AI 解读引用）
+    ma5: Optional[Decimal] = None
+    ma10: Optional[Decimal] = None
+    ma20: Optional[Decimal] = None
+    rsi: Optional[Decimal] = None
+    macd_dif: Optional[Decimal] = None
+    macd_dea: Optional[Decimal] = None
+    macd_hist: Optional[Decimal] = None
+    max_drawdown: Optional[Decimal] = None
+    volatility: Optional[Decimal] = None
+    rebound_from_low: Optional[Decimal] = None   # 当前距近60日低点反弹幅度
     failures: List[str] = field(default_factory=list)  # 未通过条件明细
     error: Optional[str] = None            # 数据拉取异常信息（None 表示无异常）
 
@@ -137,7 +149,7 @@ def evaluate_stock(kline_df: Optional[pd.DataFrame], code: str, industry: str,
                               pe_percentile=None, passed=False,
                               failures=["K 线数据为空"])
     try:
-        add_all_indicators(kline_df)  # 补齐 ma5/10/20/60/120/250、rsi、volatility、max_drawdown
+        add_all_indicators(kline_df)  # 补齐 ma/rsi/macd/volatility/max_drawdown 全部指标
     except Exception as e:
         return StockCandidate(code=code, industry=industry, price=None,
                               pe_percentile=None, passed=False,
@@ -159,15 +171,16 @@ def evaluate_stock(kline_df: Optional[pd.DataFrame], code: str, industry: str,
     if mdd is None or mdd < s.max_drawdown_required:
         failures.append(f"近{s.drawdown_window}日最大回撤 {_fmt(mdd)} "
                         f"< {s.max_drawdown_required}")
+    rebound_from_low: Optional[Decimal] = None
     if price is not None:
         window_closes = [_as_decimal(v) for v in
                          kline_df["close"].tail(s.drawdown_window)]
         valid = [v for v in window_closes if v is not None and v > 0]
         if valid:
             low60 = min(valid)
-            rebound = (price - low60) / low60
-            if rebound > s.rebound_from_low_max:
-                failures.append(f"当前距低点反弹 {_fmt(rebound)} > {s.rebound_from_low_max}")
+            rebound_from_low = (price - low60) / low60
+            if rebound_from_low > s.rebound_from_low_max:
+                failures.append(f"当前距低点反弹 {_fmt(rebound_from_low)} > {s.rebound_from_low_max}")
 
     # 4) 趋势确认：收 > MA20 且 MA5 > MA10 > MA20
     ma5, ma10, ma20 = (_as_decimal(latest["ma5"]), _as_decimal(latest["ma10"]),
@@ -189,21 +202,50 @@ def evaluate_stock(kline_df: Optional[pd.DataFrame], code: str, industry: str,
     if rsi_val is None or not (s.rsi_min <= rsi_val <= s.rsi_max):
         failures.append(f"RSI {_fmt(rsi_val)} 不在 [{s.rsi_min}, {s.rsi_max}]")
 
+    # PE 分位计算（P4 修正：增加降级窗口 5→3→2 年，提高覆盖率）
+    # 修正记录（P4）：百度股市通估值接口对部分中小盘股或次新股覆盖不足，
+    # 5 年窗口内有效样本不够时返回 None。现按 5→3→2 年逐级降级尝试，
+    # 并在日志中记录实际使用的窗口或缺失原因。
     pe_percentile: Optional[Decimal] = None
+    pe_window_used: Optional[int] = None
+    pe_missing_reason: str = ""
     if valuation_df is not None and not valuation_df.empty:
-        try:
-            valuation_percentile(valuation_df, column="pe", years=s.pe_percentile_years)
-            col = f"pe_percentile_{s.pe_percentile_years}y"
-            pe_percentile = _as_decimal(valuation_df[col].iloc[-1])
-        except Exception:
-            pe_percentile = None
+        # 降级窗口序列：配置年限 → 3 年 → 2 年（去重且降序）
+        fallback_windows = sorted(set([s.pe_percentile_years, 3, 2]), reverse=True)
+        for years in fallback_windows:
+            try:
+                valuation_percentile(valuation_df, column="pe", years=years)
+                col = f"pe_percentile_{years}y"
+                val = _as_decimal(valuation_df[col].iloc[-1])
+                if val is not None:
+                    pe_percentile = val
+                    pe_window_used = years
+                    break
+            except Exception:
+                continue
+        if pe_percentile is None:
+            pe_missing_reason = f"估值数据仅 {len(valuation_df)} 行，全部窗口均无法计算"
+            print(f"[stock_screener] {code} PE 分位缺失: {pe_missing_reason}")
+    else:
+        pe_missing_reason = "估值数据为空（百度接口无数据或拉取失败）"
+        print(f"[stock_screener] {code} PE 分位缺失: {pe_missing_reason}")
+
     if pe_percentile is None or pe_percentile > s.pe_percentile_max:
+        window_info = f"（{pe_window_used}年窗口）" if pe_window_used else f"（{pe_missing_reason}）"
         failures.append(f"PE 近{s.pe_percentile_years}年分位 {_fmt(pe_percentile)} "
-                        f"> {s.pe_percentile_max}（或缺失/为负）")
+                        f"> {s.pe_percentile_max} {window_info}")
 
     return StockCandidate(code=code, industry=industry, price=price,
                           pe_percentile=pe_percentile,
-                          passed=not failures, failures=failures)
+                          passed=not failures, failures=failures,
+                          # 指标快照回填（P4 修正：供 Layer 4 AI 解读引用）
+                          ma5=ma5, ma10=ma10, ma20=ma20,
+                          rsi=rsi_val,
+                          macd_dif=_as_decimal(latest["macd_dif"]),
+                          macd_dea=_as_decimal(latest["macd_dea"]),
+                          macd_hist=_as_decimal(latest["macd_hist"]),
+                          max_drawdown=mdd, volatility=vol,
+                          rebound_from_low=rebound_from_low)
 
 
 def _fmt(v: Optional[Decimal]) -> str:

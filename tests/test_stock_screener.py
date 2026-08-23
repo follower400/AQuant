@@ -144,3 +144,21 @@ class TestEvaluateStock:
                            for i in range(40)])  # 5 -> 16.7 递增，末值分位为 1
         cand = evaluate_stock(make_full_pass_kline(), "000001", "电子", val)
         assert any("PE" in f for f in cand.failures)
+
+    def test_indicator_snapshot_filled(self):
+        """指标快照应回填真实数值（P4 修正：供 Layer 4 AI 解读，严禁全部为 None）"""
+        kline = make_full_pass_kline()
+        cand = evaluate_stock(kline, "000001", "电子", make_low_pe_val())
+        for field_name in ("ma5", "ma10", "ma20", "rsi",
+                           "macd_dif", "macd_dea", "macd_hist",
+                           "max_drawdown", "volatility", "rebound_from_low"):
+            assert getattr(cand, field_name) is not None, f"{field_name} 未回填"
+        # MA 多头排列与初筛结论一致（full pass 场景）
+        assert cand.ma5 > cand.ma10 > cand.ma20
+
+    def test_indicator_snapshot_defaults_none(self):
+        """K 线为空时指标快照应为 None（不抛异常）"""
+        cand = evaluate_stock(None, "000001", "电子")
+        assert cand.ma5 is None
+        assert cand.rsi is None
+        assert cand.rebound_from_low is None

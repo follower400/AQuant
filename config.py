@@ -169,6 +169,7 @@ _RULES: Dict[str, Dict[str, str]] = {
         "max_retries_per_model": _INT,
         "timeout_seconds": _INT,
         "max_tokens": _INT,
+        "max_batch_size": _INT,          # P4 新增：单次 AI 调用最大股票数（分批控制）
         "temperature": _RATIO,           # 0~1 浮点，复用 RATIO 校验
     },
 }
