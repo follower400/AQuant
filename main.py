@@ -51,7 +51,8 @@ from src.market_regime import (
     is_half_position_triggered,
     is_panic_add_triggered,
 )
-from src.stock_screener import StockCandidate, screen_tech_stocks, fetch_industry_pool
+from src.stock_screener import StockCandidate, screen_tech_stocks
+from src.pool_snapshot import resolve_stock_pool
 from src.ai_layer import analyze, check_data_health
 from src.notifier import (
     send_notification,
@@ -159,13 +160,11 @@ def run(dry_run: bool = False, stock_pool_str: Optional[str] = None) -> None:
         stock_pool = _parse_stock_pool(stock_pool_str)
         _log(f"[Layer 3] 手工股票池: {stock_pool}")
     else:
-        try:
-            stock_pool = fetch_industry_pool()
-            _log(f"[Layer 3] 行业成分股: {len(stock_pool)} 只")
-        except RuntimeError as e:
-            _log(f"[Layer 3] 行业成分股拉取失败: {e}")
-            _log("[Layer 3] 使用冒烟测试小池作为降级...")
-            stock_pool = {"000063": "通信", "300750": "电力设备"}
+        # 三级降级链（P4 新增）：静态快照 → 手工池 → 内置小池。
+        # 东财实时成分股接口反爬严重，改由 tools/fetch_pool_snapshot.py
+        # 离线抓取快照，实盘运行时不再实时拉取。
+        stock_pool, pool_source = resolve_stock_pool()
+        _log(f"[Layer 3] 成分股池来源: {pool_source}")
 
     candidates = screen_tech_stocks(stock_pool)
     passed = [c for c in candidates if c.passed]

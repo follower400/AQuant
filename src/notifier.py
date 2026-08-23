@@ -20,7 +20,6 @@ PushPlus API（https://www.pushplus.plus/doc/）：
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -84,7 +83,10 @@ def send_notification(title: str, content: str, token: Optional[str] = None) -> 
         print(f"[notifier] PushPlus 推送失败（网络异常）: {e}")
         _console_fallback(title, content)
         return False
-    except (json.JSONDecodeError, KeyError) as e:
+    except (ValueError, KeyError) as e:
+        # 修正记录（P4）：resp.json() 解析失败时 requests 实际抛
+        # RequestJSONDecodeError（继承 ValueError），仅捕获 json.JSONDecodeError
+        # 会漏接导致推送崩溃；现统一按 ValueError 兜底降级控制台。
         print(f"[notifier] PushPlus 响应解析失败: {e}")
         _console_fallback(title, content)
         return False

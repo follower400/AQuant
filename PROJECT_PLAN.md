@@ -2,7 +2,7 @@
 
 ## 0. 当前进度（每完成一个 Phase 更新一次）
 
-> 最近更新：2026-08-22（完成 Phase 3 AI 解读层：提示词工程 + 分层代理池 + Pydantic-AI 校验 + 配置开关 + 数据健康检查）
+> 最近更新：2026-08-23（Phase 4 Windows 侧端到端联调完成：主入口 + 通知层 + AI 分批调用 + 指标快照回填 + 股票池快照降级链；Ubuntu Crontab 部署待实施）
 
 | 阶段 | 任务 | 状态 |
 | :--- | :--- | :--- |
@@ -10,7 +10,7 @@
 | 前置 | 工程结构搭建与分层架构规划 | ✅ 已完成 |
 | 前置 | 阿里云百炼 API 连通性验证 | ✅ 已完成 |
 | 前置 | 文档配套：requirements.txt / .gitignore 完善 | ✅ 已完成 |
-| Phase 0 | `config/settings.yaml` 参数总表（PRD 全部阈值提取） | ✅ 已完成 |
+| Phase 0 | `settings.yaml` 参数总表（PRD 全部阈值提取） | ✅ 已完成 |
 | Phase 0 | `config.py` 加载与校验逻辑（类型/范围/交叉校验） | ✅ 已完成 |
 | Phase 0 | SQLite 本地缓存模块（AKShare 降级读取） | ✅ 已完成 |
 | Phase 1 | 数据层 `src/data_layer.py`（AKShare 封装 + SQLite 缓存，沪深300/个股） | ✅ 已完成 |
@@ -21,7 +21,13 @@
 | Phase 2 | 冒烟测试（P1+P2 主链路 smoke 标记，pytest.ini 默认跳过） | ✅ 已完成 |
 | Phase 3 | AI 解读层（ai_layer.py：Prompt 去幻觉 + 分层代理池 + Pydantic-AI 校验 + 配置开关 + 数据健康检查） | ✅ 已完成 |
 | Phase 3 | AI 层单元测试（test_config_ai.py + test_ai_layer.py，41 个用例） | ✅ 已完成 |
-| Phase 4 | 端到端联调（Ubuntu Crontab + 微信推送） | ⏳ 未开始 |
+| Phase 4 | 通知层 `src/notifier.py`（PushPlus 推送 + 控制台降级 + 三种消息格式化） | ✅ 已完成 |
+| Phase 4 | 主入口 `main.py`（L0→L5 全链路编排 + --dry-run / --stock-pool） | ✅ 已完成 |
+| Phase 4 | AI 层增强（分批调用 + 指标快照回填 + PE 降级窗口） | ✅ 已完成 |
+| Phase 4 | 股票池快照降级链（tools/fetch_pool_snapshot.py + src/pool_snapshot.py） | ✅ 已完成 |
+| Phase 4 | 单元测试（test_notifier.py + test_main.py + test_pool_snapshot.py，全量 233 用例通过） | ✅ 已完成 |
+| Phase 4 | Ubuntu Crontab 部署（推 GitHub → VM 拉取 → crontab） | ⏳ 未开始 |
+| 待办 | 金融股选股环节（PRD 3.1：PB 分位/股息率/ROE/负债率，需先接财务数据源；当前仅实现底仓仓位决策） | ⏳ 未开始 |
 | Phase 5 | 本地回测闭环（vectorbt 调参验证） | ⏳ 未开始 |
 
 ## 1. 项目核心定位（最重要：划清边界）
@@ -40,7 +46,7 @@
 | **代码版本控制** | **Git + 本地仓库** | 遵循已建立的 Git 工作流。 |
 
 ## 3. 系统架构分层（严格遵循 .coderule 的解耦要求）
-- **Layer 0 (配置层)**：`config/settings.yaml` 集中承载 PRD v2.0 的全部策略阈值；`config.py` 负责加载、类型转换与合法性校验，启动时校验失败立即报错退出，禁止使用未经验证的默认值。
+- **Layer 0 (配置层)**：`settings.yaml` 集中承载 PRD v2.0 的全部策略阈值；`config.py` 负责加载、类型转换与合法性校验，启动时校验失败立即报错退出，禁止使用未经验证的默认值。
 - **Layer 1 (数据层)**：负责调用 AKShare，清洗数据，缓存历史 K 线至本地 SQLite；网络异常时自动降级读取缓存并告警。
 - **Layer 2 (因子计算层)**：纯数学计算（MA、MACD、RSI、PB分位）。**此层严禁调用 AI**，必须用 Decimal 处理，参数一律从 Layer 0 读取。
 - **Layer 3 (策略信号层)**：根据 PRD 中的“宏观判定”、“科技股买入规则”、“金融股逢低布局”编写硬编码逻辑（If-Else），所有阈值引用 Layer 0。
@@ -49,7 +55,7 @@
 
 ## 4. 任务拆解与 Milestone（分阶段执行）
 - **Phase 0：配置系统与数据缓存（预计 1 天）**
-  - 编写 `config/settings.yaml` 参数总表：提取 PRD v2.0 全部阈值（MA/MACD/RSI 周期、止损 -8%、分批仓位比例、连跌天数、累计跌幅阈值、仓位上限等）。
+  - 编写 `settings.yaml` 参数总表：提取 PRD v2.0 全部阈值（MA/MACD/RSI 周期、止损 -8%、分批仓位比例、连跌天数、累计跌幅阈值、仓位上限等）。
   - 实现 `config.py` 的加载与校验逻辑（必填项、类型、取值范围校验），配套 pytest 单元测试。
   - 搭建 SQLite 本地缓存模块，支持 AKShare 异常时的缓存降级读取。
 - **Phase 1：数据基建与因子库（预计 2 天）**
@@ -72,8 +78,16 @@
   - config.py 新增 _STR 校验类型、enable_ai_analysis 属性。
   - 数据健康检查函数（check_data_health）：空 DataFrame 提前拦截，防止下游崩溃。
   - 全部失败时降级为纯量化信号（Markdown 格式），不阻塞主流程。
-- **Phase 4：端到端联调（预计 1 天）**
-  - 在 Ubuntu 上运行主程序，测试微信能否收到含 AI 评论的推送。
+- **Phase 4：端到端联调（预计 1 天）** — Windows 侧实际耗时约 1.5 天（含多轮缺陷修复）
+  - 实现 `src/notifier.py`（Layer 5：PushPlus 推送 + Token 缺失/推送失败全兜底降级控制台）。
+  - 实现 `main.py` 主入口（L0→L5 编排、--dry-run / --stock-pool 参数、异常告警推送）。
+  - 修复 AI 连通问题（.env 缺 https 前缀、qwen 思考模式与 tool_choice 冲突）。
+  - AI 分批调用（max_batch_size=5 + 超时 60s，12 只股票 3 分钟 → 33 秒）。
+  - PE 分位降级窗口（5→3→2 年）与缺失原因日志。
+  - 指标快照回填（StockCandidate 携带 MA/RSI/MACD 等 10 字段供 AI 引用）。
+  - 股票池三级降级链：静态快照 → 手工池 → 内置小池（东财成分股接口反爬应对）。
+  - 单元测试 233 个全部通过；端到端验证 12 只手工池全流程成功。
+  - 待办：推送 GitHub 后在 Ubuntu VM 配置 crontab（9:40 / 14:40）。
 - **Phase 5：本地回测闭环（预计 2 天，可与 Phase 4 并行）**
   - 引入 vectorbt 做轻量本地回测，实现 settings.yaml 调参后快速验证；聚宽回测仅作最终有效性确认。
 
@@ -127,8 +141,24 @@
 | 15 | OpenAIChatModel 不接受 `base_url` 参数 | v2 改为通过 `OpenAIProvider(base_url=...)` 传入 | 显式构建 `OpenAIProvider` 后传入 `provider` 参数 | ai_layer.py |
 | 16 | test_all_candidates_have_error 断言文本不匹配 | 健康检查先于 Prompt 构建拦截，降级信号含「数据源异常」而非「无有效候选股票」 | 修正断言为 `数据源异常` | tests/test_ai_layer.py |
 
-### 8.4 经验教训与改进
+### 8.4 Phase 4：端到端联调与缺陷修复
+
+| # | 问题描述 | 根因 | 修复方案 | 影响文件 |
+|---|---------|------|---------|--------|
+| 17 | AI 模型调用 404 | `.env` 中 DASHSCOPE_BASE_URL 缺 `https://` 前缀 | 补全前缀并改用标准百炼端点 | .env |
+| 18 | qwen3.8-max 返回 400 | 思考模型在 thinking mode 下不支持 pydantic-ai 依赖的 tool_choice=required | model_settings 增加 extra_body enable_thinking=False | ai_layer.py |
+| 19 | 12 只股票单次 AI 调用反复超时（3 分钟） | 单次调用 Prompt 过长 + 超时仅 15s | 分批调用（max_batch_size=5）+ 超时 60s + 结果合并，降至 33 秒 | ai_layer.py, settings.yaml, config.py |
+| 20 | PE 分位大量缺失 | 百度股市通估值历史对部分股票覆盖不足 5 年 | 降级窗口 5→3→2 年逐级尝试 + 缺失原因日志 | stock_screener.py |
+| 21 | AI 误报「均线/RSI/MACD 指标缺失」 | 指标在初筛算后未保留，Prompt 组装字典未回填，字段全部输出 N/A | StockCandidate 新增 10 个指标快照字段并在 stock_dict 逐字段回填 | stock_screener.py, ai_layer.py |
+| 22 | dry-run 打印报告时 UnicodeEncodeError 崩溃 | Windows GBK 终端无法编码 emoji（📊/❌） | 启动时 reconfigure stdout/stderr errors=replace（保留终端原编码避免中文乱码） | main.py |
+| 23 | notifier 响应解析异常漏接 | requests 的 resp.json() 失败抛继承 ValueError 的 JSONDecodeError，仅捕 json.JSONDecodeError 会漏 | 改按 ValueError 兜底降级控制台 | notifier.py |
+| 24 | 东财行业成分股接口全部被反爬封锁（15/15 失败） | 东财 push2 接口对本机 IP 级断连 | 离线快照抓取工具 + 「静态快照 → 手工池 → 内置小池」三级降级链 | tools/fetch_pool_snapshot.py, src/pool_snapshot.py, main.py |
+
+### 8.5 经验教训与改进
 1. **AKShare 接口稳定性**：东方财富接口反爬策略升级频繁，已实现自动降级到新浪备用源，但仍需持续关注接口可用性变化。
 2. **前复权数据质量**：新浪源早期前复权数据存在历史性的负价/零价，这是除权算法的数学溢出效应，必须在因子层做防御性过滤。
 3. **Mock 数据设计原则**：自动化测试用例应经过手工演算验证（如二笔、三笔条件的 mock 数据），否则会掩盖真实路径 bug。
 4. **PowerShell 兼容性**：复杂参数的 python -c 命令在 PowerShell 中存在引号转义问题，已改用临时脚本文件方案（用完即删）。
+5. **AI 报「数据缺失」先查组装链路**：指标明明算好了却没传给 Prompt，会导致 AI 如实转述 N/A 并误导排查方向；数据类应保留指标快照并在组装层逐字段回填。
+6. **终端编码必须处理**：凡输出含 emoji 的脚本，在 Windows GBK 终端与 Linux crontab C 编码下都会触发 UnicodeEncodeError，需提前 reconfigure（errors=replace）。
+7. **反爬严重的第三方接口用离线快照**：实时拉取不可靠时，「人工值守抓取快照 + 静态降级链」比无限重试更稳定（如东财成分股）。

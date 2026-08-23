@@ -35,7 +35,11 @@ env/
 pytest.ini
 
 # ---- 本地数据与日志（AKShare 缓存、SQLite、回测产物）----
-data/
+# 修正记录（P4）：data/ 整体忽略会误伤股票池降级链依赖的两个 JSON（快照与手工池），
+# 它们需随 git 分发到 Ubuntu VM（见 src/pool_snapshot.py 三级降级链），故加白名单例外。
+data/*
+!data/industry_pool_snapshot.json
+!data/manual_pool.json
 cache/
 *.db
 *.sqlite

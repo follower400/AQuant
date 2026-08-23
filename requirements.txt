@@ -20,6 +20,9 @@ python-dotenv>=1.0.1
 
 # ---- Layer 4/5 网络层：百炼 API、PushPlus 微信推送 ----
 requests>=2.31.0
+# eval_type_backport：pydantic-ai 在 Python 3.9 环境下的类型解析回退依赖，
+# 3.10+ 可自动跳过，保留以兼容 Ubuntu VM 可能较低的 Python 版本（P4 补充）
+eval_type_backport>=1.2.0
 
 # ---- Layer 4 AI 层：阿里云百炼（OpenAI 兼容接口 + Pydantic-AI 结构化输出） ----
 openai>=1.40.0

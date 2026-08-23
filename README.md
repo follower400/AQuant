@@ -11,68 +11,79 @@
 
 本项目是为个人投资者设计的 A 股智能盯盘辅助系统。它解决了手动盯盘耗时、情绪干扰大的痛点，通过 **“量化硬性筛选 + AI 柔性解读”** 的双层架构，每日定时推送高价值的交易信号。
 
-核心逻辑基于自研的 **“均衡混合灵活配置策略”**（详见 [策略文档](./docs/strategy_prd.md)），涵盖：
-- 🧠 **宏观景气度判定**（区分上行/低落/强制减仓三种市场状态）
+核心逻辑基于自研的 **“均衡混合灵活配置策略”**（详见 [策略文档](./STRATEGY_PRD.md)），涵盖：
+- 🧠 **宏观景气度判定**（区分上行/低落/强制减仓三种市场状态 + 五项全局风控开关）
 - ⚡ **科技股短线分批建仓**（精确控制 30%/30%/40% 的入场节奏）
-- 🏦 **金融股与 ETF 长线底仓布局**（基于 PB/PE 历史分位）
+- 🏦 **金融股与 ETF 长线底仓仓位决策**（基于 PB/PE 历史分位；选股环节尚未实现，见 PRD 第 3 节状态注记）
 - 🛡️ **多维度卖出与全局硬性风控**（止盈止损、20日时间止损、系统性风险清仓）
 
 ## ✨ 核心功能特性
 
 - **分层解耦架构**：严格遵循数据层、因子层、策略层、AI层、通知层分离，易于维护和扩展。
 - **高精度数值计算**：全面采用 `Decimal` 类型处理价格与仓位，规避浮点数精度丢失。
-- **低成本 AI 集成**：对接阿里云百炼（通义千问），仅对初筛后的少量标的调用，日均成本控制在 0.1 元以内。
-- **实时消息推送**：通过 PushPlus 将选股结果和操作建议直接推送到微信，无需盯盘。
-- **完备的测试与回测**：核心因子逻辑包含 Pytest 单元测试；策略有效性使用聚宽（JoinQuant）进行历史数据验证。
+- **低成本 AI 集成**：对接阿里云百炼（通义千问），分批调用（每批 5 只）+ 分层代理池自动降级，日均成本控制在 0.1 元以内。
+- **多级降级永不空转**：AI 层模型池降级（主力→备用→无 AI 纯量化信号）；股票池三级降级链（静态快照 → 手工池 → 内置小池）。
+- **实时消息推送**：通过 PushPlus 将选股结果和操作建议直接推送到微信，推送失败自动降级控制台输出。
+- **完备的测试与回测**：233 个 Pytest 离线单元测试全部通过；策略有效性使用聚宽（JoinQuant）进行历史数据验证。
 
 ## 🛠 技术栈与工具
 
 | 层级 | 工具/库 | 用途 |
 | :--- | :--- | :--- |
-| **开发环境** | VS Code + Continue/Cline | AI 辅助编程，管控代码生成质量 |
+| **开发环境** | PyCharm | AI 辅助编程，管控代码生成质量 |
 | **数据源** | AKShare（东方财富 + 新浪备用源自动降级） | 获取实时行情、财务数据、估值分位 |
 | **指标计算** | Pandas, NumPy | 向量化计算 MA、RSI、MACD 等因子 |
 | **大模型** | 阿里云百炼 (通义千问 Qwen) | 将枯燥的指标转化为自然语言分析报告 |
 | **任务调度** | Ubuntu (VMware) + Crontab | 每日定时（如 9:40、14:40）唤醒主程序 |
+| **AI 结构化输出** | pydantic-ai v2（Agent + output_type Schema 校验） | 大模型输出 JSON 自动提取与校验 |
 | **回测验证** | 聚宽 (JoinQuant) 免费版 | 验证策略逻辑在历史 3-5 年数据中的有效性 |
 | **消息推送** | PushPlus / Server酱 | 微信实时接收选股推送 |
 
 ## 📂 项目目录结构规划
 
 ```
-AI-Quant-Assistant/
+AQuant/
 ├── .env                           # 敏感环境变量（API Key，严禁提交至 Git）
-├── .gitignore                     # Git 忽略规则
-├── pytest.ini                    # pytest 配置（注册 smoke 标记，日常默认跳过）
+├── .gitignore                     # Git 忽略规则（data/ 下快照与手工池 JSON 例外，随 git 分发）
+├── pytest.ini                     # pytest 配置（注册 smoke/network 标记，日常默认跳过）
 ├── README.md                      # 项目总览（本文件）
 ├── requirements.txt               # Python 依赖包列表
+├── settings.yaml                  # 策略参数总表（Layer 0：总资金、止盈止损、AI 配置等）
+├── config.py                      # Layer 0：配置加载与类型/范围/交叉校验（启动即校验）
+├── main.py                        # 主入口：L0→L5 全链路编排（--dry-run / --stock-pool）
+├── STRATEGY_PRD.md                # 策略详细需求文档（已定稿）
+├── PROJECT_PLAN.md                # 项目工程实施计划（任务拆解蓝图 + 错误总结）
 │
-├── config/                        # 配置文件目录
-│   └── settings.yaml              # 策略参数总表（如总资金、止盈止损阈值）
-│
-├── docs/                          # 文档目录
-│   ├── strategy_prd.md            # 策略详细需求文档（已定稿）
-│   └── project_plan.md            # 项目工程实施计划（任务拆解蓝图 + 错误总结）
+├── data/                          # 本地数据（SQLite 缓存被忽略；以下两个 JSON 随 git 分发）
+│   ├── industry_pool_snapshot.json  # 行业成分股静态快照（离线抓取生成）
+│   └── manual_pool.json           # 手工交易池（人工维护，格式 {code: industry}）
 │
 ├── src/                           # 核心源代码（严格遵循分层架构）
-│   ├── data_layer.py              # 数据层：AKShare 封装 + SQLite 缓存 + 非正价净化
-│   ├── indicators.py              # 因子层：MA/MACD/RSI/年化波动率/回撤/估值分位
-│   ├── market_regime.py           # 策略层 L3：宏观景气判定 + 全局风控开关
-│   ├── stock_screener.py          # 策略层 L3：科技股初筛（PRD 2.1 六条件全逻辑）
-│   ├── position_sizing.py         # 策略层 L3：分批建仓 + 底仓决策 + 三层上限校验
-│   └── main.py                    # 程序主入口（编排上述模块）
+│   ├── data_layer.py              # L1 数据层：AKShare 封装 + SQLite 缓存 + 非正价净化
+│   ├── indicators.py              # L2 因子层：MA/MACD/RSI/年化波动率/回撤（Decimal）
+│   ├── market_regime.py           # L3 策略层：宏观景气判定 + 五项全局风控开关
+│   ├── stock_screener.py          # L3 策略层：科技股初筛（含指标快照回填供 AI 引用）
+│   ├── position_sizing.py         # L3 策略层：分批建仓 + 金融/ETF 底仓决策 + 三层上限校验
+│   ├── pool_snapshot.py           # L3 辅助：股票池三级降级链（快照 → 手工池 → 内置小池）
+│   ├── ai_layer.py                # L4 AI 层：分批调用 + 分层代理池 + Pydantic-AI 校验
+│   └── notifier.py                # L5 通知层：PushPlus 推送 + 控制台降级 + 报告格式化
 │
-├── tests/                         # 单元测试与冒烟测试目录
-│   ├── conftest.py                # pytest 共享配置（sys.path 注册）
-│   ├── test_data_layer.py         # 数据层缓存读写闭环 + 新鲜度 + Schema
-│   ├── test_indicators.py         # 因子计算层精度验证（含脏数据防御测试）
-│   ├── test_market_regime.py      # 宏观景气判定 + 风控五开关
-│   ├── test_stock_screener.py     # 科技股选股单票评估（白名单/回撤/涨停等）
-│   ├── test_position_sizing.py    # 仓位决策 + 上限校验（三批触发/暂停/加速）
-│   └── test_smoke.py              # P1+P2 主链路冒烟测试（访问真实 AKShare 数据源）
+├── tools/                         # 离线运维工具（人工值守运行，不进主流程）
+│   └── fetch_pool_snapshot.py     # 行业成分股快照抓取（东财反爬应对，建议每周一次）
 │
-└── joinquant/                     # 聚宽回测脚本（与本地代码解耦）
-    └── backtest_research.ipynb    # 在聚宽研究环境运行的验证脚本
+└── tests/                         # 单元测试与冒烟测试目录（233 个离线用例）
+    ├── conftest.py                # pytest 共享配置（sys.path 注册）
+    ├── test_data_layer.py         # 数据层缓存读写闭环 + 新鲜度 + Schema
+    ├── test_indicators.py         # 因子计算层精度验证（含脏数据防御测试）
+    ├── test_market_regime.py      # 宏观景气判定 + 风控五开关
+    ├── test_stock_screener.py     # 科技股选股单票评估（白名单/回撤/涨停/指标快照）
+    ├── test_position_sizing.py    # 仓位决策 + 上限校验（三批触发/暂停/加速）
+    ├── test_config_ai.py          # AI 相关配置校验（模型池/超时/开关）
+    ├── test_ai_layer.py           # AI 层：Prompt 组装/分批合并/降级路径（离线 mock）
+    ├── test_notifier.py           # 通知层：推送成功/失败降级/报告格式化（离线 mock）
+    ├── test_main.py               # 主入口：参数解析/全链路编排/异常告警分支（离线 mock）
+    ├── test_pool_snapshot.py      # 股票池快照存取与三级降级链（临时目录隔离）
+    └── test_smoke.py              # P1+P2 主链路冒烟测试（访问真实 AKShare 数据源）
 ```
 
 ## 🚀 快速开始 (Quick Start)
@@ -99,24 +110,31 @@ PUSHPLUS_TOKEN=your_pushplus_token_here
 SIMULATED_TOTAL_CAPITAL=1000000
 ```
 
-### 4. 运行本地测试
+### 4. 运行本地测试与主程序
 ```bash
-# 运行所有离线单元测试（默认跳过冒烟测试，保持回归快速）
-pytest tests/
+# 运行所有离线单元测试（默认跳过冒烟/网络测试，保持回归快速）
+python -m pytest tests/ -q
 
 # 显式运行冒烟测试（串连 P1+P2 主链路，访问真实 AKShare 数据源）
-pytest -m smoke -v
+python -m pytest -m smoke -v
 
-# 手动运行一次主程序（不依赖定时任务）
-python src/main.py
+# 手动运行一次主程序（完整链路：数据 → 初筛 → AI 解读 → 推送）
+python main.py
+
+# 仅控制台查看报告不推送（冒烟验证用）
+python main.py --dry-run
+
+# 使用手工交易池（格式：代码:行业,代码:行业）
+python main.py --stock-pool "000063:通信,300750:电力设备"
 ```
 若配置正确，你绑定的微信账号将在 1 分钟内收到当日的选股推送报告。
+（东财成分股接口反爬严重，自动池采用离线快照：`python tools/fetch_pool_snapshot.py`，建议每周人工刷新一次；快照缺失时自动降级手工池/内置小池。注意：新克隆的仓库若快照尚未生成，运行时会直接降级到手工池，属预期行为。）
 
 ## 📊 策略回测说明
 
 本项目 **不包含内置回测引擎**。我们强烈建议在将策略逻辑编码到本地之前，先在聚宽平台进行充分的离线验证。
 
-- **验证方法**：将 `src/strategy_layer/` 中的硬编码条件（如 MA5>MA20）复制到 `/joinquant/backtest_research.ipynb` 中，利用聚宽 `run_backtest()` 函数查看历史收益曲线和最大回撤。
+- **验证方法**：将 `src/` 策略层模块（market_regime / stock_screener）中的硬编码条件复制到聚宽回测脚本中，利用聚宽 `run_backtest()` 函数查看历史收益曲线和最大回撤。
 - **历史表现目标**：年化收益 ≥ 12%，波动率 ≤ 18%，最大回撤 < 25%。
 
 ## 📝 开发规范 (必读)
@@ -136,8 +154,11 @@ python src/main.py
 - [x] 数据层与因子层代码编写（Phase 1）
 - [x] 策略信号逻辑工程化（market_regime / stock_screener / position_sizing）（Phase 2）
 - [x] 估值历史分位与冒烟测试（P2 配套）
-- [ ] AI 提示词工程与端到端联调（Phase 3）
-- [ ] Ubuntu 服务器定时任务部署（Phase 4）
+- [x] AI 提示词工程（Phase 3：Prompt 去幻觉 + 分层代理池 + Pydantic-AI 校验）
+- [x] Windows 侧端到端联调（Phase 4：主入口 + 通知层 + AI 分批 + 股票池快照降级链，233 个单元测试通过）
+- [ ] Ubuntu 服务器定时任务部署（Phase 4 收尾：推 GitHub → VM 拉取 → crontab 9:40/14:40）
+- [ ] 金融股选股环节（PRD 3.1，当前仅实现底仓仓位决策）
+- [ ] 本地回测闭环（Phase 5：vectorbt 调参验证）
 
 ## ⚠️ 免责声明 (Disclaimer)
 
