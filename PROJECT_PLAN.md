@@ -2,7 +2,7 @@
 
 ## 0. 当前进度（每完成一个 Phase 更新一次）
 
-> 最近更新：2026-08-23（Phase 4 Windows 侧端到端联调完成：主入口 + 通知层 + AI 分批调用 + 指标快照回填 + 股票池快照降级链；Ubuntu Crontab 部署待实施）
+> 最近更新：2026-08-25（P4 策略重构完成：①PE/PB 分位可选化 ②推荐池持久化与熊市减仓建议 ③熊市切换金融股简化筛选 ④AI 解读层临时停用（只输出纯筛选报告）；全量 273 个单元测试通过；Ubuntu Crontab 部署待实施）
 
 | 阶段 | 任务 | 状态 |
 | :--- | :--- | :--- |
@@ -26,8 +26,10 @@
 | Phase 4 | AI 层增强（分批调用 + 指标快照回填 + PE 降级窗口） | ✅ 已完成 |
 | Phase 4 | 股票池快照降级链（tools/fetch_pool_snapshot.py + src/pool_snapshot.py） | ✅ 已完成 |
 | Phase 4 | 单元测试（test_notifier.py + test_main.py + test_pool_snapshot.py，全量 233 用例通过） | ✅ 已完成 |
+| Phase 4 | P4 策略重构（2026-08）：PE/PB 分位可选化 + 推荐池持久化（熊市减仓建议）+ 熊市切换金融股简化筛选 + AI 解读层临时停用，全量 273 用例通过 | ✅ 已完成 |
+| Phase 4 | 快照抓取工具数据源三级降级链（申万主源 → Tushare 备源 → 东财兜底），缺省白名单纳入银行/非银金融 | ✅ 已完成 |
 | Phase 4 | Ubuntu Crontab 部署（推 GitHub → VM 拉取 → crontab） | ⏳ 未开始 |
-| 待办 | 金融股选股环节（PRD 3.1：PB 分位/股息率/ROE/负债率，需先接财务数据源；当前仅实现底仓仓位决策） | ⏳ 未开始 |
+| 待办 | 金融股选股补齐（股息率/ROE/负债率，需先接财务数据源；PB 分位简化版已实现）；AI 解读层恢复评估 | ⏳ 未开始 |
 | Phase 5 | 本地回测闭环（vectorbt 调参验证） | ⏳ 未开始 |
 
 ## 1. 项目核心定位（最重要：划清边界）
@@ -88,6 +90,12 @@
   - 股票池三级降级链：静态快照 → 手工池 → 内置小池（东财成分股接口反爬应对）。
   - 单元测试 233 个全部通过；端到端验证 12 只手工池全流程成功。
   - 待办：推送 GitHub 后在 Ubuntu VM 配置 crontab（9:40 / 14:40）。
+- **Phase 4+：策略重构（P4 联调后，2026-08）** — 背景：熊市触发科技股清仓后初筛 0 只通过，且 AI 层仍将全量股票送入分析浪费 token；用户决策转向"纯筛选 + 推荐池"。
+  - ① 放宽筛选标准：PE 分位改为可选条件（`tech.pe_percentile_optional`，估值缺失时跳过），避免熊市初筛全军覆没。
+  - ② 推荐池机制：`src/recommendation_pool.py` + `data/recommendation_pool.json`，非熊市时初筛通过的股票合并入池；熊市（科技股清仓触发）时从池中取股票生成减仓/清仓建议随报告推送。
+  - ③ 熊市切换金融股筛选（简化版）：`evaluate_financial_stock` / `screen_finance_stocks` 仅校验 PB 近 5 年分位 ≤ 30%（含可选模式），行业白名单 `value.financial_industries`（银行/非银金融）；快照抓取工具缺省纳入金融行业并改为申万一级接口主源（东财被反爬封锁）。
+  - ④ AI 层处置：Layer 4 临时停用（main.py 注释，Layer 5 改用 `format_screening_report` 纯筛选报告）；`analyze()` 补 passed 过滤与 0 通过短路，恢复时不再全量调用。
+  - 新增测试：test_recommendation_pool.py + test_fetch_pool_snapshot.py，全量 273 用例通过。
 - **Phase 5：本地回测闭环（预计 2 天，可与 Phase 4 并行）**
   - 引入 vectorbt 做轻量本地回测，实现 settings.yaml 调参后快速验证；聚宽回测仅作最终有效性确认。
 
@@ -153,6 +161,10 @@
 | 22 | dry-run 打印报告时 UnicodeEncodeError 崩溃 | Windows GBK 终端无法编码 emoji（📊/❌） | 启动时 reconfigure stdout/stderr errors=replace（保留终端原编码避免中文乱码） | main.py |
 | 23 | notifier 响应解析异常漏接 | requests 的 resp.json() 失败抛继承 ValueError 的 JSONDecodeError，仅捕 json.JSONDecodeError 会漏 | 改按 ValueError 兜底降级控制台 | notifier.py |
 | 24 | 东财行业成分股接口全部被反爬封锁（15/15 失败） | 东财 push2 接口对本机 IP 级断连 | 离线快照抓取工具 + 「静态快照 → 手工池 → 内置小池」三级降级链 | tools/fetch_pool_snapshot.py, src/pool_snapshot.py, main.py |
+| 25 | 初筛 0 只通过时 AI 层仍将全量股票送入分析（token 浪费） | analyze() 构建 candidates_data 时未按 passed 过滤，且 0 通过时无短路 | 加 passed 过滤 + 0 通过短路（0 次 API 调用） | ai_layer.py |
+| 26 | 熊市初筛几乎全军覆没 | 估值数据缺失直接判不通过（百度接口对中小盘股无覆盖）；深跌条件与趋势确认条件在熊市内在矛盾 | PE 分位改可选模式（有数据才校验，日志留痕） | settings.yaml, config.py, stock_screener.py |
+| 27 | settings.yaml 新增字段不生效 | config.py 只解析 `_RULES` 中注册的字段，未注册字段静默丢弃 | 新字段同步注册到 `_RULES`（pe_percentile_optional/pb_percentile_optional/financial_industries） | config.py |
+| 28 | 快照抓取工具东财单源双端被封锁，快照永远无法生成 | 原仅东财单源 | 三级数据源降级链：申万一级接口主源 → Tushare 可选备源 → 东财兜底 | tools/fetch_pool_snapshot.py |
 
 ### 8.5 经验教训与改进
 1. **AKShare 接口稳定性**：东方财富接口反爬策略升级频繁，已实现自动降级到新浪备用源，但仍需持续关注接口可用性变化。
@@ -162,3 +174,5 @@
 5. **AI 报「数据缺失」先查组装链路**：指标明明算好了却没传给 Prompt，会导致 AI 如实转述 N/A 并误导排查方向；数据类应保留指标快照并在组装层逐字段回填。
 6. **终端编码必须处理**：凡输出含 emoji 的脚本，在 Windows GBK 终端与 Linux crontab C 编码下都会触发 UnicodeEncodeError，需提前 reconfigure（errors=replace）。
 7. **反爬严重的第三方接口用离线快照**：实时拉取不可靠时，「人工值守抓取快照 + 静态降级链」比无限重试更稳定（如东财成分股）。
+8. **配置新字段必须在 config._RULES 注册**：load_settings 只解析 `_RULES` 中声明的字段，新增 settings.yaml 字段不注册会静默不生效（必填字段缺失则启动报错），改动需同步两处并补配置校验测试。
+9. **筛选条件要与市场状态自洽**：熊市下"超跌反弹"与"趋势确认"类条件内在矛盾，通过率趋零是策略必然而非 bug；缺失数据类条件应改"有数据才校验"的可选模式，而非一刀切判不通过。

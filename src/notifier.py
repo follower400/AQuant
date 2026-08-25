@@ -16,13 +16,17 @@ PushPlus API（https://www.pushplus.plus/doc/）：
     from notifier import send_notification, format_ai_report, format_degraded_report
     send_notification("📊 AQuant 信号", "# 景气上行\\n...")
     send_notification("📊 纯量化信号", format_degraded_signal(analysis_result))
+
+    # P4 策略调整（AI 层停用期间）：纯筛选报告 + 推荐池减仓建议
+    from notifier import format_screening_report, format_reduce_suggestions
 """
 
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import requests
 
@@ -153,6 +157,98 @@ def format_degraded_report(analysis_result) -> str:
         "---",
         "_AI 层不可用，仅展示量化指标信号_",
     ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 消息格式化：纯筛选报告（P4 策略调整：AI 层停用期间替代 AI 报告）
+# ---------------------------------------------------------------------------
+def _fmt(v) -> str:
+    """数值格式化：None 显示 N/A，Decimal 去除冗余精度"""
+    if v is None:
+        return "N/A"
+    if isinstance(v, Decimal):
+        return format(v.normalize(), "f")
+    return str(v)
+
+
+def _fmt_pct(v) -> str:
+    """比率格式化为百分比：0.35 → 35.0%，None 显示 N/A"""
+    if v is None:
+        return "N/A"
+    return f"{float(v) * 100:.1f}%"
+
+
+def format_screening_report(candidates, regime: str,
+                            risk_flags: Dict[str, bool]) -> str:
+    """将初筛结果格式化为 Markdown 消息（AI 层停用期间的推送正文）
+
+    :param candidates: stock_screener.screen_tech_stocks 返回的全部候选列表
+    :param regime: 市场状态中文名（MarketRegime.value）
+    :param risk_flags: 风控五开关 {名称: 是否触发}
+    :return: Markdown 格式的消息正文
+    """
+    passed = [c for c in candidates if c.passed]
+    error_count = sum(1 for c in candidates if getattr(c, "error", None))
+    triggered = [name for name, on in risk_flags.items() if on]
+
+    lines = [
+        "# 📊 AQuant 筛选结果报告",
+        "",
+        f"**市场状态**: {regime}",
+        "",
+        "## 筛选统计",
+        f"- 评估: {len(candidates)} 只",
+        f"- 通过初筛: {len(passed)} 只",
+        f"- 数据异常: {error_count} 只",
+        "",
+        "## 风控信号",
+        (", ".join(triggered) if triggered else "全部未触发"),
+    ]
+
+    lines.append("")
+    lines.append("## 通过初筛的股票")
+    if passed:
+        for c in passed:
+            lines.append(f"\n### {c.code}（{c.industry}）")
+            lines.append(f"- **收盘价**: {_fmt(c.price)}")
+            # P4 策略调整：指标明细按有值才显示——科技股显示 PE/技术面，
+            # 金融股显示 PB 分位，避免满屏 N/A。
+            if c.pe_percentile is not None:
+                lines.append(f"- **PE 分位**: {_fmt_pct(c.pe_percentile)}")
+            if getattr(c, "pb_percentile", None) is not None:
+                lines.append(f"- **PB 分位**: {_fmt_pct(c.pb_percentile)}")
+            if c.rsi is not None:
+                lines.append(f"- **RSI14**: {_fmt(c.rsi)}")
+            if c.max_drawdown is not None:
+                lines.append(f"- **近60日最大回撤**: {_fmt_pct(c.max_drawdown)}")
+            if c.rebound_from_low is not None:
+                lines.append(f"- **距低点反弹**: {_fmt_pct(c.rebound_from_low)}")
+    else:
+        lines.append("_本次无股票通过初筛_")
+
+    lines.append("\n---\n_由 AQuant 量化系统生成（AI 解读已临时停用）_")
+    return "\n".join(lines)
+
+
+def format_reduce_suggestions(pool: Dict[str, dict]) -> str:
+    """将推荐池持仓格式化为减仓建议区块（熊市科技股清仓信号触发时追加）
+
+    :param pool: recommendation_pool 载入的推荐池 {code: 入池记录}
+    :return: Markdown 格式的减仓建议区块（调用方自行追加到报告末尾）
+    """
+    lines = [
+        "## 📉 推荐池减仓建议（熊市 · 科技股清仓信号已触发）",
+        "",
+        "以下为此前初筛推荐过的股票，建议逢反弹分批减仓或清仓：",
+    ]
+    for code, info in pool.items():
+        first_at = str(info.get("first_recommended_at", ""))[:10] or "未知"
+        count = info.get("recommend_count", 1)
+        price = info.get("price", "") or "N/A"
+        lines.append(
+            f"- **{code}**（{info.get('industry', '')}）"
+            f"推荐价 {price} | 首次入池 {first_at} | 累计入池 {count} 次")
     return "\n".join(lines)
 
 

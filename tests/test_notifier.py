@@ -5,7 +5,8 @@ Token 未配置降级控制台、AI 报告 / 降级报告 / 异常告警三种�
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from decimal import Decimal
+from typing import List, Optional
 
 import requests
 
@@ -243,3 +244,113 @@ class TestFormatErrorAlert:
         assert "运行告警" in alert
         assert "DataFetchError: 指数拉取失败" in alert
         assert "```" in alert  # 错误信息包裹在代码块中
+
+
+# ---------------------------------------------------------------------------
+# 纯筛选报告格式化（P4 策略调整：AI 层停用期间替代 AI 报告）
+# ---------------------------------------------------------------------------
+@dataclass
+class FakeScreenerCandidate:
+    """stock_screener.StockCandidate 的替身（仅含报告用到的字段）"""
+    code: str = "000063"
+    industry: str = "通信"
+    price: Optional[Decimal] = Decimal("12.34")
+    pe_percentile: Optional[Decimal] = Decimal("0.35")
+    pb_percentile: Optional[Decimal] = None
+    passed: bool = True
+    rsi: Optional[Decimal] = Decimal("42.5")
+    max_drawdown: Optional[Decimal] = Decimal("0.36")
+    rebound_from_low: Optional[Decimal] = Decimal("0.05")
+    error: Optional[str] = None
+
+
+RISK_FLAGS_NONE = {
+    "强制减仓": False, "科技股减半": False, "禁止开仓": False,
+    "科技股清仓": False, "恐慌加仓": False,
+}
+
+
+class TestFormatScreeningReport:
+    def test_full_report(self):
+        """完整报告：市场状态 / 统计 / 风控 / 通过股票指标明细均应出现"""
+        cands = [
+            FakeScreenerCandidate(),
+            FakeScreenerCandidate(code="300750", industry="电力设备",
+                                  passed=False),
+            FakeScreenerCandidate(code="600519", industry="电子",
+                                  passed=False, error="拉取超时"),
+        ]
+        report = notifier.format_screening_report(cands, "低落横盘",
+                                                  RISK_FLAGS_NONE)
+        assert "筛选结果报告" in report
+        assert "低落横盘" in report                 # 市场状态
+        assert "评估: 3 只" in report
+        assert "通过初筛: 1 只" in report
+        assert "数据异常: 1 只" in report           # error 计数不含未通过无异常者
+        assert "全部未触发" in report               # 风控无触发占位文案
+        assert "000063（通信）" in report
+        assert "12.34" in report                    # 收盘价（去冗余精度）
+        assert "35.0%" in report                    # PE 分位百分比化
+        assert "42.5" in report                     # RSI
+        assert "36.0%" in report                    # 最大回撤百分比化
+        assert "AI 解读已临时停用" in report
+
+    def test_no_passed_placeholder(self):
+        """0 只通过时输出占位文案而非崩溃"""
+        cands = [FakeScreenerCandidate(passed=False)]
+        report = notifier.format_screening_report(cands, "景气上行",
+                                                  RISK_FLAGS_NONE)
+        assert "通过初筛: 0 只" in report
+        assert "本次无股票通过初筛" in report
+
+    def test_triggered_risk_flags_listed(self):
+        """风控触发时列出触发项名称"""
+        flags = dict(RISK_FLAGS_NONE)
+        flags["科技股清仓"] = True
+        report = notifier.format_screening_report([], "低落横盘", flags)
+        assert "科技股清仓" in report
+        assert "全部未触发" not in report
+
+    def test_missing_indicators_omitted(self):
+        """指标缺失（None）时对应行不显示而非输出 N/A（金融股候选只有收盘价+PB）"""
+        cands = [FakeScreenerCandidate(pe_percentile=None, rsi=None,
+                                       max_drawdown=None, rebound_from_low=None)]
+        report = notifier.format_screening_report(cands, "景气上行",
+                                                  RISK_FLAGS_NONE)
+        assert "PE 分位" not in report
+        assert "RSI14" not in report
+        assert "近60日最大回撤" not in report
+        assert "距低点反弹" not in report
+
+    def test_pb_percentile_shown_for_finance(self):
+        """金融股候选：显示 PB 分位行（百分比化）"""
+        cands = [FakeScreenerCandidate(code="601398", industry="银行",
+                                       pe_percentile=None,
+                                       pb_percentile=Decimal("0.25"))]
+        report = notifier.format_screening_report(cands, "BEAR",
+                                                  RISK_FLAGS_NONE)
+        assert "PB 分位**: 25.0%" in report
+        assert "PE 分位" not in report
+
+
+class TestFormatReduceSuggestions:
+    def test_pool_entries_rendered(self):
+        """减仓建议：逐条渲染代码/行业/推荐价/首次入池日期/累计次数"""
+        pool = {
+            "000063": {"industry": "通信", "price": "35.2",
+                       "first_recommended_at": "2026-08-01T09:40:00",
+                       "last_recommended_at": "2026-08-20T14:40:00",
+                       "recommend_count": 3},
+            "300750": {"industry": "电力设备", "price": "",
+                       "first_recommended_at": "",
+                       "recommend_count": 1},
+        }
+        block = notifier.format_reduce_suggestions(pool)
+        assert "减仓建议" in block and "清仓" in block
+        assert "**000063**（通信）" in block
+        assert "推荐价 35.2" in block
+        assert "首次入池 2026-08-01" in block
+        assert "累计入池 3 次" in block
+        assert "**300750**（电力设备）" in block
+        assert "推荐价 N/A" in block            # 空价格兼容
+        assert "首次入池 未知" in block          # 空时间兼容

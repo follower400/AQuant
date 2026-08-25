@@ -68,6 +68,8 @@ class StockCandidate:
     max_drawdown: Optional[Decimal] = None
     volatility: Optional[Decimal] = None
     rebound_from_low: Optional[Decimal] = None   # 当前距近60日低点反弹幅度
+    # P4 策略调整：金融股筛选回填 PB 分位（科技股筛选保持 None）
+    pb_percentile: Optional[Decimal] = None
     failures: List[str] = field(default_factory=list)  # 未通过条件明细
     error: Optional[str] = None            # 数据拉取异常信息（None 表示无异常）
 
@@ -230,10 +232,19 @@ def evaluate_stock(kline_df: Optional[pd.DataFrame], code: str, industry: str,
         pe_missing_reason = "估值数据为空（百度接口无数据或拉取失败）"
         print(f"[stock_screener] {code} PE 分位缺失: {pe_missing_reason}")
 
-    if pe_percentile is None or pe_percentile > s.pe_percentile_max:
-        window_info = f"（{pe_window_used}年窗口）" if pe_window_used else f"（{pe_missing_reason}）"
+    # P4 策略调整：PE 分位改为可选条件（tech.pe_percentile_optional）。
+    # 修正记录：原实现估值数据缺失时直接判不通过，而百度估值接口对大量中小盘股无覆盖，
+    # 导致熊市初筛几乎全军覆没；现缺失时跳过该条件（日志留痕），有数据时仍按阈值校验。
+    if pe_percentile is not None and pe_percentile > s.pe_percentile_max:
+        window_info = f"（{pe_window_used}年窗口）" if pe_window_used else ""
         failures.append(f"PE 近{s.pe_percentile_years}年分位 {_fmt(pe_percentile)} "
                         f"> {s.pe_percentile_max} {window_info}")
+    elif pe_percentile is None and not s.pe_percentile_optional:
+        window_info = f"（{pe_window_used}年窗口）" if pe_window_used else f"（{pe_missing_reason}）"
+        failures.append(f"PE 近{s.pe_percentile_years}年分位 {_fmt(pe_percentile)} "
+                        f"（缺失且未开启可选模式）{window_info}")
+    elif pe_percentile is None:
+        print(f"[stock_screener] {code} PE 分位缺失，可选模式跳过该条件: {pe_missing_reason}")
 
     return StockCandidate(code=code, industry=industry, price=price,
                           pe_percentile=pe_percentile,
@@ -251,6 +262,65 @@ def evaluate_stock(kline_df: Optional[pd.DataFrame], code: str, industry: str,
 def _fmt(v: Optional[Decimal]) -> str:
     """Decimal/None 格式化输出（四舍五入 4 位小数，None 显示 -）"""
     return "-" if v is None else f"{v.quantize(Decimal('0.0001'))}"
+
+
+def _percentile_with_fallback(valuation_df: Optional[pd.DataFrame], column: str,
+                              years: int) -> tuple:
+    """估值分位计算（含降级窗口）：配置年限 → 3 年 → 2 年逐级尝试
+
+    :return: (percentile, window_used, missing_reason)；成功时 reason 为 ""
+    """
+    if valuation_df is None or valuation_df.empty:
+        return None, None, "估值数据为空（百度接口无数据或拉取失败）"
+    for win in sorted(set([years, 3, 2]), reverse=True):
+        try:
+            valuation_percentile(valuation_df, column=column, years=win)
+            val = _as_decimal(valuation_df[f"{column}_percentile_{win}y"].iloc[-1])
+            if val is not None:
+                return val, win, ""
+        except Exception:
+            continue
+    return None, None, f"估值数据仅 {len(valuation_df)} 行，全部窗口均无法计算"
+
+
+# ---------------------------------------------------------------------------
+# 金融股单票评估（P4 策略调整：熊市切换筛选，简化版）
+# ---------------------------------------------------------------------------
+def evaluate_financial_stock(kline_df: Optional[pd.DataFrame], code: str,
+                             industry: str,
+                             valuation_df: Optional[pd.DataFrame] = None
+                             ) -> StockCandidate:
+    """金融股简化版初筛（PRD 3.1 简化：仅保留有数据源的 PB 分位条件）
+
+    简化说明（P4 策略调整）：股息率/ROE/资产负债率因无可靠免费数据源
+    （东财财务接口反爬）暂不校验，待数据源接入后补齐；现仅校验：
+      1. PB 近 N 年分位 <= value.pb_percentile_max（30%），
+         估值缺失时按 value.pb_percentile_optional 决定是否跳过。
+    """
+    v = config.get_settings().value
+    failures: List[str] = []
+    if kline_df is None or kline_df.empty:
+        return StockCandidate(code=code, industry=industry, price=None,
+                              pe_percentile=None, passed=False,
+                              failures=["K 线数据为空"])
+    price = _as_decimal(kline_df["close"].iloc[-1])
+
+    pb_percentile, pb_window_used, pb_missing_reason = _percentile_with_fallback(
+        valuation_df, "pb", v.pb_percentile_years)
+    if pb_percentile is not None and pb_percentile > v.pb_percentile_max:
+        window_info = f"（{pb_window_used}年窗口）" if pb_window_used else ""
+        failures.append(f"PB 近{v.pb_percentile_years}年分位 {_fmt(pb_percentile)} "
+                        f"> {v.pb_percentile_max} {window_info}")
+    elif pb_percentile is None and not v.pb_percentile_optional:
+        failures.append(f"PB 近{v.pb_percentile_years}年分位 {_fmt(pb_percentile)} "
+                        f"（缺失且未开启可选模式）（{pb_missing_reason}）")
+    elif pb_percentile is None:
+        print(f"[stock_screener] {code} PB 分位缺失，可选模式跳过该条件: "
+              f"{pb_missing_reason}")
+
+    return StockCandidate(code=code, industry=industry, price=price,
+                          pe_percentile=None, pb_percentile=pb_percentile,
+                          passed=not failures, failures=failures)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +381,31 @@ def screen_tech_stocks(stock_pool: Optional[Dict[str, str]] = None) -> List[Stoc
         except DataFetchError as e:
             print(f"[stock_screener] {code} 估值历史拉取失败（PE 条件视为不通过）: {e}")
         results.append(evaluate_stock(kline, code, industry, valuation))
+    return results
+
+
+def screen_finance_stocks(stock_pool: Dict[str, str]) -> List[StockCandidate]:
+    """金融股简化版筛选主流程（P4 策略调整：熊市科技股清仓时切换）
+
+    :param stock_pool: {code: industry} 金融股候选池（从行业快照中按
+                       value.financial_industries 白名单筛出）
+    :return: 全部候选结果（含未通过项与失败原因），调用方按 passed 过滤
+    """
+    results: List[StockCandidate] = []
+    for code, industry in stock_pool.items():
+        try:
+            kline = get_kline(code)
+        except DataFetchError as e:
+            results.append(StockCandidate(code=code, industry=industry, price=None,
+                                          pe_percentile=None, passed=False,
+                                          failures=[], error=f"K 线拉取失败: {e}"))
+            continue
+        valuation: Optional[pd.DataFrame] = None
+        try:
+            valuation = get_valuation_history(code)
+        except DataFetchError as e:
+            print(f"[stock_screener] {code} 估值历史拉取失败（PB 条件按可选模式处理）: {e}")
+        results.append(evaluate_financial_stock(kline, code, industry, valuation))
     return results
 
 

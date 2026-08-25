@@ -209,6 +209,83 @@ class TestIndicatorPrompt:
         assert "N/A" in prompt            # 未提供的字段（如波动率）仍为 N/A，向后兼容
 
 
+def _patch_ai_settings(monkeypatch, *, api_key="test-key"):
+    """注入合法 FakeSettings（enable_ai_analysis=True），供 analyze 路径测试复用"""
+    import config as cfg
+    fake_ai = cfg._Section({
+        "enable_ai_analysis": True,
+        "primary_model": "qwen3.8-max",
+        "fallback_models": [],
+        "max_retries_per_model": 1,
+        "timeout_seconds": 15,
+        "max_tokens": 2000,
+        "max_batch_size": 5,
+        "temperature": 0.3,
+    })
+
+    class FakeSettings:
+        enable_ai_analysis = True
+        ai = fake_ai
+        dashscope_api_key = api_key
+        dashscope_base_url = "https://test.com/v1"
+
+    monkeypatch.setattr(cfg, "get_settings", lambda: FakeSettings())
+
+
+def _valid_index_df():
+    return pd.DataFrame({
+        "close": [Decimal("100")] * 10,
+        "trade_date": [f"2026-01-{i+1:02d}" for i in range(10)],
+    })
+
+
+# ---------------------------------------------------------------------------
+# analyze 候选过滤（P4 策略调整：AI 只评价通过初筛的股票）
+# ---------------------------------------------------------------------------
+class TestAnalyzePassedFilter:
+    def test_zero_passed_short_circuits_no_api(self, monkeypatch):
+        """0 只通过初筛：直接降级返回，不构建代理池、不调 API（节省 token）"""
+        _patch_ai_settings(monkeypatch)
+        calls = {"build_agents": 0}
+
+        def boom():
+            calls["build_agents"] += 1
+            raise AssertionError("不应构建代理池")
+        monkeypatch.setattr(ai, "_build_agents", boom)
+
+        c = _make_candidate(passed=False)
+        result = ai.analyze([c], "BEAR", index_df=_valid_index_df())
+        assert result.used_ai is False
+        assert calls["build_agents"] == 0
+        assert any("跳过 AI 分析" in e for e in result.errors)
+        assert "无通过初筛" in result.degraded_signal
+
+    def test_only_passed_candidates_in_prompt(self, monkeypatch):
+        """未通过初筛的股票不应进入 Prompt（只评价通过筛选的股票）"""
+        _patch_ai_settings(monkeypatch)
+        captured = {}
+
+        class CaptureAgent:
+            def run_sync(self, prompt, model_settings=None):
+                captured["prompt"] = prompt
+
+                class R:
+                    output = ai.StockAnalysis(
+                        stock_recommendations=[], market_summary="ok")
+                return R()
+
+        monkeypatch.setattr(ai, "_build_agents",
+                            lambda: [("model-a", CaptureAgent())])
+
+        passed_c = _make_candidate(code="000001", passed=True)
+        failed_c = _make_candidate(code="000002", passed=False)
+        result = ai.analyze([passed_c, failed_c], "BULL",
+                            index_df=_valid_index_df())
+        assert result.used_ai is True
+        assert "000001" in captured["prompt"]
+        assert "000002" not in captured["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # 降级信号
 # ---------------------------------------------------------------------------

@@ -8,6 +8,13 @@
 # >=1.18.0：包含 stock_zh_valuation_baidu（百度股市通估值接口）与新浪备用源支持
 akshare>=1.18.0
 
+# ---- 股票池快照抓取数据源（tools/fetch_pool_snapshot.py，P4 新增）----
+# 主源为申万一级行业成分（akshare sw_index_first_info / index_component_sw，
+# 数据来自申万官网/乐咕，无需额外安装）；baostock 因返回证监会行业分类
+# （电子/计算机/通信合并为 C39 不可拆分）已从降级链移除。
+# Tushare：可选备源，仅当 .env 配置 TUSHARE_TOKEN 时启用（接口需 2000 积分）
+tushare>=1.4.0
+
 # ---- Layer 2 因子计算层：向量化指标计算 ----
 pandas>=2.2.0
 numpy>=1.26.0

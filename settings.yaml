@@ -45,6 +45,7 @@ tech:
   rsi_max: 55                  # 估值区间：RSI <= 55
   pe_percentile_years: 5       # PE 分位回看年限
   pe_percentile_max: 0.50      # PE 近5年分位 <= 50%
+  pe_percentile_optional: true # P4 策略调整：PE 分位改为可选条件——估值数据缺失时跳过该条件（不判不通过），有数据时仍按 pe_percentile_max 校验。背景：百度估值接口对大量中小盘股无覆盖，原“缺失即不通过”导致熊市初筛几乎全军覆没
 
   # ---- 分批建仓（三次合计必须为 100%）----
   position_1st: 0.30           # 首次建仓比例 30%
@@ -72,8 +73,12 @@ tech:
 # 3. 金融股与 ETF 长线底仓策略 (Value & ETF)
 # ---------------------------------------------------------------------------
 value:
+  financial_industries:          # P4 策略调整：熊市切换金融股筛选的行业白名单
+    - 银行
+    - 非银金融
   pb_percentile_years: 5       # PB 分位回看年限
-  pb_percentile_max: 0.30      # 金融股 PB 近5年分位 <= 30%
+  pb_percentile_max: 0.30      # 金融股 PB 近 5 年分位 <= 30%
+  pb_percentile_optional: true # P4 策略调整：PB 分位改为可选条件（与 tech.pe_percentile_optional 一致）——估值数据缺失时跳过该条件（不判不通过），有数据时仍按 pb_percentile_max 校验
   dividend_yield_min: 0.03     # 股息率 >= 3%
   roe_min_percentile: 0.40     # ROE >= 行业 40 分位
   debt_ratio_max_percentile: 0.60  # 资产负债率 <= 行业 60 分位

@@ -51,13 +51,26 @@ from src.market_regime import (
     is_half_position_triggered,
     is_panic_add_triggered,
 )
-from src.stock_screener import StockCandidate, screen_tech_stocks
+from src.stock_screener import (
+    StockCandidate,
+    screen_tech_stocks,
+    screen_finance_stocks,
+)
 from src.pool_snapshot import resolve_stock_pool
-from src.ai_layer import analyze, check_data_health
+from src.recommendation_pool import (
+    load_recommendation_pool,
+    update_recommendation_pool,
+)
+# P4 策略调整（临时）：AI 解读层停用（策略重构中），Layer 4 整段跳过，
+# 只输出筛选结果；策略定型后恢复以下导入与 Layer 4 调用。
+# from src.ai_layer import analyze, check_data_health
+from src.ai_layer import check_data_health
 from src.notifier import (
     send_notification,
-    format_ai_report,
-    format_degraded_report,
+    format_screening_report,
+    format_reduce_suggestions,
+    # format_ai_report,        # AI 层停用期间不再使用（保留备恢复）
+    # format_degraded_report,  # 同上
     format_error_alert,
 )
 
@@ -152,9 +165,8 @@ def run(dry_run: bool = False, stock_pool_str: Optional[str] = None) -> None:
     _log(f"[Layer 3] 风控信号: {', '.join(triggered) if triggered else '全部未触发'}")
 
     # -----------------------------------------------------------------------
-    # Layer 3（选股）：科技股初筛
+    # Layer 3（选股）：科技股初筛（熊市科技股清仓时切换金融股筛选）
     # -----------------------------------------------------------------------
-    _log("[Layer 3] 科技股初筛...")
     stock_pool: Optional[Dict[str, str]] = None
     if stock_pool_str:
         stock_pool = _parse_stock_pool(stock_pool_str)
@@ -166,7 +178,21 @@ def run(dry_run: bool = False, stock_pool_str: Optional[str] = None) -> None:
         stock_pool, pool_source = resolve_stock_pool()
         _log(f"[Layer 3] 成分股池来源: {pool_source}")
 
-    candidates = screen_tech_stocks(stock_pool)
+    # P4 策略调整：熊市防御——科技股清仓触发（沪深300 跌破 MA120）时不再分析科技股，
+    # 切换为金融股简化筛选（PRD 3.1 简化：仅 PB 分位条件）。
+    if risk_flags["科技股清仓"]:
+        finance_pool = {c: i for c, i in stock_pool.items()
+                        if i in settings.value.financial_industries}
+        if finance_pool:
+            _log(f"[Layer 3] 科技股清仓已触发，切换金融股筛选（{len(finance_pool)} 只）")
+            candidates = screen_finance_stocks(finance_pool)
+        else:
+            _log("[Layer 3] ⚠️ 科技股清仓已触发，但股票池无金融行业成分股"
+                 "（请运行 tools/fetch_pool_snapshot.py 更新快照纳入银行/非银金融）")
+            candidates = []
+    else:
+        _log("[Layer 3] 科技股初筛...")
+        candidates = screen_tech_stocks(stock_pool)
     passed = [c for c in candidates if c.passed]
     error_count = sum(1 for c in candidates if c.error is not None)
     _log(f"[Layer 3] 初筛结果: {len(candidates)} 只评估, "
@@ -180,36 +206,53 @@ def run(dry_run: bool = False, stock_pool_str: Optional[str] = None) -> None:
         _log(f"[健康检查] 数据异常: {health_issues}")
 
     # -----------------------------------------------------------------------
-    # Layer 4：AI 解读
+    # Layer 4：AI 解读（P4 策略调整：临时停用，策略重构中）
     # -----------------------------------------------------------------------
-    _log("[Layer 4] AI 解读...")
-    analysis_result = analyze(
-        candidates=candidates,
-        regime=regime.value,
-        index_df=index_df,
-        risk_flags=risk_flags,
-    )
+    _log("[Layer 4] AI 解读已临时停用（策略重构中），跳过，直接输出筛选结果")
+    # analysis_result = analyze(
+    #     candidates=candidates,
+    #     regime=regime.value,
+    #     index_df=index_df,
+    #     risk_flags=risk_flags,
+    # )
+    #
+    # if analysis_result.used_ai:
+    #     _log(f"[Layer 4] AI 分析成功（模型: {analysis_result.used_model}）")
+    #     if analysis_result.analysis:
+    #         recs = analysis_result.analysis.stock_recommendations
+    #         _log(f"[Layer 4] 推荐: {len(recs)} 只股票")
+    #         for r in recs:
+    #             _log(f"  - {r.code}: {r.action} (信心 {r.confidence}/5)")
+    # else:
+    #     _log(f"[Layer 4] AI 降级: {analysis_result.errors}")
 
-    if analysis_result.used_ai:
-        _log(f"[Layer 4] AI 分析成功（模型: {analysis_result.used_model}）")
-        if analysis_result.analysis:
-            recs = analysis_result.analysis.stock_recommendations
-            _log(f"[Layer 4] 推荐: {len(recs)} 只股票")
-            for r in recs:
-                _log(f"  - {r.code}: {r.action} (信心 {r.confidence}/5)")
+    # -----------------------------------------------------------------------
+    # 推荐池维护（P4 策略调整）：
+    #   科技股清仓触发（熊市）→ 不入池，从推荐池取股票生成减仓建议；
+    #   其余情况 → 初筛通过的股票合并入推荐池（data/recommendation_pool.json）。
+    # -----------------------------------------------------------------------
+    reduce_suggestions = ""
+    if risk_flags["科技股清仓"]:
+        pool = load_recommendation_pool()
+        if pool:
+            reduce_suggestions = format_reduce_suggestions(pool)
+            _log(f"[推荐池] 科技股清仓触发，池内 {len(pool)} 只，已生成减仓建议")
+        else:
+            _log("[推荐池] 科技股清仓触发，但推荐池为空，暂无减仓建议")
+    elif passed:
+        update_recommendation_pool(passed)
+        _log(f"[推荐池] {len(passed)} 只通过初筛的股票已写入推荐池")
     else:
-        _log(f"[Layer 4] AI 降级: {analysis_result.errors}")
+        _log("[推荐池] 本次无通过初筛的股票，推荐池保持不变")
 
     # -----------------------------------------------------------------------
-    # Layer 5：格式化 + 推送
+    # Layer 5：格式化 + 推送（P4 策略调整：AI 层停用期间只输出筛选报告）
     # -----------------------------------------------------------------------
     _log("[Layer 5] 格式化通知消息...")
-    if analysis_result.used_ai:
-        title = f"📊 AQuant AI 分析 ({regime.value})"
-        content = format_ai_report(analysis_result)
-    else:
-        title = f"📊 AQuant 纯量化信号 ({regime.value})"
-        content = format_degraded_report(analysis_result)
+    title = f"📊 AQuant 筛选结果 ({regime.value})"
+    content = format_screening_report(candidates, regime.value, risk_flags)
+    if reduce_suggestions:
+        content += "\n\n" + reduce_suggestions
 
     # 追加风控信号到消息末尾
     if triggered:

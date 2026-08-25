@@ -9,7 +9,11 @@ from decimal import Decimal
 
 import pandas as pd
 
-from src.stock_screener import _limit_up_threshold, evaluate_stock
+from src.stock_screener import (
+    _limit_up_threshold,
+    evaluate_stock,
+    evaluate_financial_stock,
+)
 
 
 def make_kline(closes, lows=None, highs=None, opens=None, volumes=None):
@@ -35,6 +39,16 @@ def make_val_df(pe_values):
     return pd.DataFrame({
         "trade_date": dates,
         "pe": [v if isinstance(v, Decimal) else Decimal(str(v)) for v in pe_values],
+    })
+
+
+def make_pb_val_df(pb_values):
+    """构造估值历史 DataFrame（trade_date 升序 + pb 列，金融股筛选用）"""
+    dates = [d.strftime("%Y-%m-%d")
+             for d in pd.date_range("2024-01-01", periods=len(pb_values))]
+    return pd.DataFrame({
+        "trade_date": dates,
+        "pb": [v if isinstance(v, Decimal) else Decimal(str(v)) for v in pb_values],
     })
 
 
@@ -113,14 +127,25 @@ class TestEvaluateStock:
         assert not cand.passed
         assert any("白名单" in f for f in cand.failures)
 
-    def test_pe_condition_fails_without_valuation(self):
+    def test_pe_missing_passes_when_optional(self):
+        """P4 策略调整：可选模式（settings.yaml 默认）下估值数据缺失时跳过 PE 条件，
+        其余条件全满足则通过（修正记录：原"缺失即不通过"导致熊市初筛全军覆没）"""
         cand = evaluate_stock(make_full_pass_kline(), "000001", "电子", None)
-        assert not cand.passed
-        assert any("PE" in f for f in cand.failures)
+        assert cand.passed, f"预期通过，实际失败项: {cand.failures}"
+        assert not any("PE" in f for f in cand.failures)
 
-    def test_pe_condition_fails_with_empty_valuation(self):
+    def test_pe_missing_passes_when_optional_empty_df(self):
+        """估值 DataFrame 为空时同样按可选模式跳过 PE 条件"""
         cand = evaluate_stock(make_full_pass_kline(), "000001", "电子",
                               pd.DataFrame())
+        assert cand.passed, f"预期通过，实际失败项: {cand.failures}"
+
+    def test_pe_missing_fails_when_not_optional(self, monkeypatch):
+        """可选开关关闭时，估值数据缺失仍判不通过（保留原行为的回归验证）"""
+        import config as cfg
+        monkeypatch.setattr(cfg.get_settings().tech,
+                            "pe_percentile_optional", False)
+        cand = evaluate_stock(make_full_pass_kline(), "000001", "电子", None)
         assert not cand.passed
         assert any("PE" in f for f in cand.failures)
 
@@ -155,6 +180,53 @@ class TestEvaluateStock:
             assert getattr(cand, field_name) is not None, f"{field_name} 未回填"
         # MA 多头排列与初筛结论一致（full pass 场景）
         assert cand.ma5 > cand.ma10 > cand.ma20
+
+
+# ---------------------------------------------------------------------------
+# 金融股简化版评估（P4 策略调整：熊市切换筛选）
+# ---------------------------------------------------------------------------
+class TestEvaluateFinancialStock:
+    def test_low_pb_passes(self):
+        """PB 末值处历史低分位：通过初筛且回填 pb_percentile"""
+        kline = make_kline([Decimal("6.0")] * 40)
+        pb_val = make_pb_val_df(
+            [Decimal("2.0") - Decimal(i) * Decimal("0.03") for i in range(40)])
+        cand = evaluate_financial_stock(kline, "601398", "银行", pb_val)
+        assert cand.passed, f"预期通过，实际失败项: {cand.failures}"
+        assert cand.pb_percentile is not None
+        assert cand.pb_percentile <= Decimal("0.30")
+        assert cand.price == Decimal("6.0")
+
+    def test_high_pb_fails(self):
+        """PB 末值处历史高分位：不通过"""
+        kline = make_kline([Decimal("6.0")] * 40)
+        pb_val = make_pb_val_df(
+            [Decimal("0.5") + Decimal(i) * Decimal("0.05") for i in range(40)])
+        cand = evaluate_financial_stock(kline, "601398", "银行", pb_val)
+        assert not cand.passed
+        assert any("PB" in f for f in cand.failures)
+
+    def test_pb_missing_passes_when_optional(self):
+        """可选模式（默认）：估值缺失时跳过 PB 条件"""
+        kline = make_kline([Decimal("6.0")] * 40)
+        cand = evaluate_financial_stock(kline, "601398", "银行", None)
+        assert cand.passed, f"预期通过，实际失败项: {cand.failures}"
+        assert cand.pb_percentile is None
+
+    def test_pb_missing_fails_when_not_optional(self, monkeypatch):
+        """可选开关关闭：估值缺失仍判不通过"""
+        import config as cfg
+        monkeypatch.setattr(cfg.get_settings().value,
+                            "pb_percentile_optional", False)
+        kline = make_kline([Decimal("6.0")] * 40)
+        cand = evaluate_financial_stock(kline, "601398", "银行", None)
+        assert not cand.passed
+        assert any("PB" in f for f in cand.failures)
+
+    def test_kline_none(self):
+        cand = evaluate_financial_stock(None, "601398", "银行")
+        assert not cand.passed
+        assert "K 线数据为空" in cand.failures
 
     def test_indicator_snapshot_defaults_none(self):
         """K 线为空时指标快照应为 None（不抛异常）"""

@@ -349,10 +349,13 @@ def analyze(
             errors=issues,
         )
 
-    # 3) 构建候选数据（仅包含有数据的候选股）
+    # 3) 构建候选数据（仅包含通过初筛且有数据的候选股）
     # 修正记录（P4）：原 stock_dict 仅含 code/industry/price/pe_percentile，
     # Prompt 模板期望的均线/RSI/MACD 等字段全部输出 N/A，导致 AI 误报「指标缺失」。
     # 现从 StockCandidate 指标快照（evaluate_stock 回填）取真实数值。
+    # 策略调整（P4）：原实现把全部候选（含未通过初筛者）发给 AI，熊市 0 只通过时
+    # 仍对 1400+ 只股票批量调用（数百批 × 多模型 × 重试）纯属浪费 token；
+    # 现仅送 passed=True 的股票，0 只通过时直接短路返回（0 次 API 调用）。
     def _fmt_field(cand, name: str) -> str:
         """指标字段格式化：非空转字符串，缺失/属性不存在时输出 N/A"""
         val = getattr(cand, name, None)
@@ -362,6 +365,8 @@ def analyze(
     for c in candidates:
         if getattr(c, "error", None) is not None:
             continue  # 跳过数据拉取失败的股票
+        if not getattr(c, "passed", False):
+            continue  # 跳过未通过初筛的股票（策略调整：AI 只评价通过筛选的股票）
         stock_dict: Dict = {
             "code": c.code,
             "industry": c.industry,
@@ -382,11 +387,13 @@ def analyze(
         candidates_data.append(stock_dict)
 
     if not candidates_data:
+        # 策略调整（P4）：0 只通过初筛时直接降级返回，不构建代理池、不调 API
         return AnalysisResult(
             analysis=None, used_ai=False, used_model="",
-            degraded_signal="无有效候选股票数据，跳过 AI 分析",
+            degraded_signal=_build_degraded_signal(
+                candidates, regime, risk_flags),
             candidates=candidates, regime=regime,
-            errors=["无有效候选股票"],
+            errors=["无通过初筛的候选股票，跳过 AI 分析（节省 token）"],
         )
 
     # 4) 分层代理池构建（一次性构建，分批复用）

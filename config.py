@@ -42,6 +42,9 @@ ENV_REGISTRY: Dict[str, Tuple[str, ...]] = {
     "dashscope_base_url": ("DASHSCOPE_BASE_URL", "OPENAI_BASE_URL"),
     "deepseek_api_key": ("API_KEY_Deepseek",),
     "pushplus_token": ("PUSHPLUS_TOKEN",),
+    # P4 新增：Tushare Pro Token（可选），仅 tools/fetch_pool_snapshot.py
+    # 成分股快照抓取的备用数据源使用；未配置时自动跳过该数据源。
+    "tushare_token": ("TUSHARE_TOKEN",),
 }
 
 # 模拟总资产的环境变量名与默认值（单位：元）
@@ -106,6 +109,8 @@ _RULES: Dict[str, Dict[str, str]] = {
         "rsi_max": _LEVEL,
         "pe_percentile_years": _INT,
         "pe_percentile_max": _RATIO,
+        # P4 策略调整：PE 分位可选开关（缺失时跳过该条件而非判不通过）
+        "pe_percentile_optional": _BOOL,
         "position_1st": _RATIO,
         "position_2nd": _RATIO,
         "position_3rd": _RATIO,
@@ -126,8 +131,12 @@ _RULES: Dict[str, Dict[str, str]] = {
         "stop_loss": _RATIO,
     },
     "value": {
+        # P4 策略调整：熊市切换金融股筛选的行业白名单（申万一级行业名）
+        "financial_industries": _LIST_STR,
         "pb_percentile_years": _INT,
         "pb_percentile_max": _RATIO,
+        # P4 策略调整：PB 分位可选开关（缺失时跳过该条件而非判不通过）
+        "pb_percentile_optional": _BOOL,
         "dividend_yield_min": _RATIO,
         "roe_min_percentile": _RATIO,
         "debt_ratio_max_percentile": _RATIO,
@@ -398,6 +407,11 @@ class Settings:
         return self.env["pushplus_token"]
 
     @property
+    def tushare_token(self) -> Optional[str]:
+        """Tushare Pro Token（P4 新增，可选），未配置时为 None（快照抓取跳过该备源）"""
+        return self.env["tushare_token"]
+
+    @property
     def enable_ai_analysis(self) -> bool:
         """AI 分析总开关（P3 新增）：False 时跳过 AI 层，直接输出纯量化信号"""
         return self.ai.enable_ai_analysis
@@ -466,6 +480,7 @@ def _self_check() -> None:
     print(f"[OK] 阿里云百炼 Key: {'已配置' if s.dashscope_api_key else '未配置'} | "
           f"Base URL: {'已配置' if s.dashscope_base_url else '未配置'}")
     print(f"[OK] PushPlus Token: {'已配置' if s.pushplus_token else '未配置'}")
+    print(f"[OK] Tushare Token: {'已配置' if s.tushare_token else '未配置（快照抓取备用源不可用）'}")
     # P3 新增：AI 层配置摘要（不打印 API Key）
     print(f"[OK] AI 分析开关: {'开启' if s.enable_ai_analysis else '关闭'} | "
           f"主力模型: {s.ai.primary_model} | 备用: {s.ai.fallback_models}")

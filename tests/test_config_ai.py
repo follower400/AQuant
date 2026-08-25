@@ -30,6 +30,8 @@ def base_settings(tmp_path, monkeypatch):
             "limit_up_months": 3, "volatility_min": 0.20, "volatility_max": 0.60,
             "rsi_min": 30, "rsi_max": 55, "pe_percentile_years": 5,
             "pe_percentile_max": 0.50,
+            # P4 策略调整：PE 分位可选开关（缺失时跳过该条件）
+            "pe_percentile_optional": True,
             "position_1st": 0.30, "position_2nd": 0.30, "position_3rd": 0.40,
             "first_volume_ratio": 1.2, "pause_add_drop": 0.05,
             "accelerate_add_rise": 0.08,
@@ -41,7 +43,10 @@ def base_settings(tmp_path, monkeypatch):
             "t_buy_below_ma": 0.02, "stop_loss": 0.08,
         },
         "value": {
+            # P4 策略调整：熊市金融股筛选白名单 + PB 分位可选开关
+            "financial_industries": ["银行", "非银金融"],
             "pb_percentile_years": 5, "pb_percentile_max": 0.30,
+            "pb_percentile_optional": True,
             "dividend_yield_min": 0.03, "roe_min_percentile": 0.40,
             "debt_ratio_max_percentile": 0.60,
             "etf_list": ["创业板ETF"],

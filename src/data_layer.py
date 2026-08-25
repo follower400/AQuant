@@ -261,7 +261,7 @@ def _fetch_stock_daily(stock_code: str, adjust: str = "qfq") -> pd.DataFrame:
         )
         return _normalize_kline(raw, stock_code)
     except Exception as e:
-        print(f"[data_layer] 东财个股接口失败，降级新浪备用源: {e}")
+        # print(f"[data_layer] 东财个股接口失败，降级新浪备用源: {e}")
         return _fetch_stock_daily_sina(stock_code, adjust)
 
 
