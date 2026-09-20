@@ -291,6 +291,13 @@ def max_drawdown(df: pd.DataFrame, window: Optional[int] = None,
         if len(chunk) < 2:
             continue
         peak = max(chunk)
+        # 修正记录（聚宽回测 P0）：真实前复权数据含非正收盘价（如 000001 新浪源
+        # 早期 -3.08 / 0），peak <= 0 时 (peak - trough) / peak 抛 DivisionByZero，
+        # 被 evaluate_stock 的 except 吞为 error="指标计算失败"，导致零交易。
+        # 现对非正峰值直接跳过该窗口（非正价无回撤意义），与 annualized_volatility
+        # 的非正价防御保持一致。影响面：仅 max_drawdown 对脏数据的容忍度。
+        if peak <= 0:
+            continue
         peak_index = chunk.index(peak)  # 首个峰值
         trough = min(chunk[peak_index:])  # 峰值之后的最低点
         out[i] = (peak - trough) / peak

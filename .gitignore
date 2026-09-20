@@ -46,6 +46,7 @@ cache/
 *.log
 backtest_output/
 market_cache.db
+MEMORY_about_jqstrategy.md
 
 # ---- 系统文件 ----
 .DS_Store
